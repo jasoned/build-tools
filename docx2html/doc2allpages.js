@@ -1,13 +1,19 @@
+Got it. Here is a full drop-in v1.5.0 that applies everything except 1 and 7, and adds “wrap selection with class” from a dropdown.
+
+```js
 // === Canvas DOCX → RCE Toolbelt =============================================
 // PASTE THIS IN THE BROWSER CONSOLE WHILE EDITING A CANVAS PAGE
 // It adds a floating UI above the RCE to upload/convert/process DOCX content,
 // run your post-processing tools on current content, preview styles,
-// and save back via API. Now supports drag & drop of .docx files.
+// and save back via API. Now supports drag & drop of .docx files and
+// wrapping the current selection in a section class.
 //
-// Version: 1.4.1 (removed Convert/Process buttons; auto-convert on file select; fixed stray tail)
+// Version: 1.5.0 (editor wait + safer matching + gentler cleanup + DnD filter +
+// idempotent topics + MutationObserver preview reapply + keyboard shortcuts +
+// better save errors + selection wrapper UI)
 //
 // -----------------------------------------------------------------------------
-// 0) Helpers: CSRF + URL context
+// 0) Helpers: CSRF + URL context  [UNCHANGED FROM YOUR REQUEST]
 function getCsrfToken() {
   const csrfRegex = new RegExp('^_csrf_token=(.*)$');
   let csrf;
@@ -52,8 +58,7 @@ if (window.__CanvasDocxToolsLoaded) {
 
   // ---------------------------------------------------------------------------
   // 2) UI Shell (top toolbar + modal + spinner + toast)
-  const root = document.createElement('div');
-  root.id = 'canvas-docx-tools';
+  let root = document.getElementById('canvas-docx-tools');
   const css = `
 #canvas-docx-tools { position: sticky; top: 0; z-index: 9999; margin-bottom: .5rem; }
 #canvas-docx-tools .cdt-wrap { background: #f7fafc; border: 1px solid #cbd5e0; border-radius: 8px; padding: 10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
@@ -72,7 +77,7 @@ if (window.__CanvasDocxToolsLoaded) {
 #cdt-toast { position:fixed; right:18px; bottom:18px; background:#225f92; color:#fff; padding:10px 14px; border-radius:8px; display:none; z-index:10001; font-size:13px; }
 
 #cdt-modal { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:center; justify-content:center; z-index:10000;}
-#cdt-modal .inner { background:#fff; max-width:640px; width:92vw; border-radius:10px; padding:18px; }
+#cdt-modal .inner { background:#fff; max-width:760px; width:92vw; border-radius:10px; padding:18px; }
 #cdt-modal h3 { margin:0 0 8px; font:600 18px/1.2 system-ui, -apple-system, Segoe UI, Roboto; }
 #cdt-modal .body { max-height:60vh; overflow:auto; border:1px solid #e2e8f0; border-radius:8px; padding:10px; background:#f8fafc; }
 #cdt-modal .row { margin-top:10px; display:flex; gap:8px; justify-content:flex-end; }
@@ -85,23 +90,33 @@ if (window.__CanvasDocxToolsLoaded) {
   style.textContent = css;
   document.head.appendChild(style);
 
-  root.innerHTML = `
-    <div class="cdt-wrap" title="You can drop a .docx file on this bar">
-      <label>DOCX:</label>
-      <input id="cdt-file" type="file" accept=".docx" />
-      <span class="cdt-note cdt-drop-tip">choose or drop a .docx (auto-converts)</span>
-      <button class="cdt-btn" type="button" id="cdt-report">Section Report</button>
-      <button class="cdt-btn warn" type="button" id="cdt-cleanup">Clean Up Formatting</button>
-      <button class="cdt-btn" type="button" id="cdt-undo" style="display:none">Undo Cleanup</button>
-      <span class="cdt-spacer"></span>
-      <button class="cdt-btn secondary" type="button" id="cdt-toggle-styles">Preview Styles: On</button>
-      <button class="cdt-btn secondary" type="button" id="cdt-style-legend">Styles Legend</button>
-      <button class="cdt-btn success" type="button" id="cdt-save">Save to Page</button>
-      <span class="cdt-note">Page: ${CanvasCtx.courseId ?? 'unknown course'} / ${CanvasCtx.pageSlug ?? 'unknown page'}</span>
-    </div>
-  `;
-  const mountTarget = document.querySelector('.edit-content') || document.body;
-  mountTarget.prepend(root);
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'canvas-docx-tools';
+    root.innerHTML = `
+      <div class="cdt-wrap" title="You can drop a .docx file on this bar">
+        <label>DOCX:</label>
+        <input id="cdt-file" type="file" accept=".docx" />
+        <span class="cdt-note cdt-drop-tip">choose or drop a .docx (auto-converts)</span>
+        <button class="cdt-btn" type="button" id="cdt-report">Section Report</button>
+        <button class="cdt-btn warn" type="button" id="cdt-cleanup">Clean Up Formatting</button>
+        <button class="cdt-btn" type="button" id="cdt-undo" style="display:none">Undo Cleanup</button>
+
+        <span class="cdt-spacer"></span>
+
+        <label for="cdt-wrap-class">Wrap selection:</label>
+        <select id="cdt-wrap-class" title="Select wrapper class for highlighted content"></select>
+        <button class="cdt-btn" type="button" id="cdt-wrap">Apply</button>
+
+        <button class="cdt-btn secondary" type="button" id="cdt-toggle-styles">Preview Styles: On</button>
+        <button class="cdt-btn secondary" type="button" id="cdt-style-legend">Styles Legend</button>
+        <button class="cdt-btn success" type="button" id="cdt-save">Save to Page</button>
+        <span class="cdt-note">Page: ${CanvasCtx.courseId ?? 'unknown course'} / ${CanvasCtx.pageSlug ?? 'unknown page'}</span>
+      </div>
+    `;
+    const mountTarget = document.querySelector('.edit-content') || document.body;
+    mountTarget.prepend(root);
+  }
 
   const spinner = document.createElement('div');
   spinner.id = 'cdt-spinner';
@@ -134,25 +149,49 @@ if (window.__CanvasDocxToolsLoaded) {
   document.head.appendChild(cdtExtraStyle);
 
   // ---------------------------------------------------------------------------
-  // 3) RCE bridge
-  function getEditor() { return (window.tinymce && tinymce.get('wiki_page_body')) || null; }
+  // 3) RCE bridge + wait
+  function getEditor() {
+    if (window.tinymce) {
+      const ed = tinymce.get('wiki_page_body') || tinymce.activeEditor;
+      if (ed && !ed.destroyed) return ed;
+    }
+    return null;
+  }
+
+  async function waitForEditor(ms=8000) {
+    const start = Date.now();
+    while (Date.now() - start < ms) {
+      const ed = getEditor();
+      if (ed && ed.getContent) return ed;
+      await new Promise(r => setTimeout(r, 150));
+    }
+    return null;
+  }
+
   function getRCEHtml() {
     const ed = getEditor();
     if (ed) return ed.getContent({format:'html'});
-    const ta = document.getElementById('wiki_page_body');
+    const ta = document.getElementById('wiki_page_body') || document.querySelector('textarea');
     return ta ? ta.value : '';
   }
   function setRCEHtml(html) {
     const ed = getEditor();
     if (ed) ed.setContent(html);
-    const ta = document.getElementById('wiki_page_body');
+    const ta = document.getElementById('wiki_page_body') || document.querySelector('textarea');
     if (ta) ta.value = html;
-    // Re-apply preview styles inside iframe after content changes
     setPreviewStyles(STATE.previewOn);
   }
 
+  // Reapply preview CSS if TinyMCE reloads
+  (function observeEditorReload(){
+    const rootEl = document.getElementById('content') || document.body;
+    if (!rootEl) return;
+    const mo = new MutationObserver(() => setPreviewStyles(STATE.previewOn));
+    mo.observe(rootEl, { childList: true, subtree: true });
+  })();
+
   // ---------------------------------------------------------------------------
-  // 4) Processing pipeline (ported from index.html)
+  // 4) Processing pipeline
   const APP_CONFIG = {
     styleMap: [
       "p[style-name='LO Heading'] => h1:fresh",
@@ -178,9 +217,14 @@ if (window.__CanvasDocxToolsLoaded) {
   };
   APP_CONFIG.allowedWrapperSelectors = [
     '#wk-topics-list',
+    '.misc',
     ...APP_CONFIG.topLevelSections.map(s => `.${s.className}`),
     ...APP_CONFIG.weeklySections.map(s => `.${s.className}`)
   ].join(', ');
+
+  // Expose config to window for quick tweaks
+  window.CanvasDocxTools = window.CanvasDocxTools || {};
+  window.CanvasDocxTools.config = APP_CONFIG;
 
   const textOnly = (el) => (el.textContent || '').trim().replace(/\s+/g, ' ');
 
@@ -221,10 +265,15 @@ if (window.__CanvasDocxToolsLoaded) {
     }
     walk(src); flushP();
   }
+
+  function headingMatches(h, target) {
+    const t = h.textContent.trim().toLowerCase().replace(/[:]+$/,'');
+    const k = target.trim().toLowerCase();
+    return t === k;
+  }
+
   function processContentTables(doc, sectionHeadingText, wrapperClass, endWithHr = false) {
-    const sectionHeadings = Array.from(doc.querySelectorAll('h1')).filter(h =>
-      h.textContent.trim().toLowerCase().includes(sectionHeadingText.toLowerCase())
-    );
+    const sectionHeadings = Array.from(doc.querySelectorAll('h1')).filter(h => headingMatches(h, sectionHeadingText));
     sectionHeadings.forEach(heading => {
       const mainWrapper = document.createElement('div'); mainWrapper.className = wrapperClass;
       const tablesToProcess = [];
@@ -248,8 +297,9 @@ if (window.__CanvasDocxToolsLoaded) {
       if (mainWrapper.hasChildNodes()) { heading.insertAdjacentElement('afterend', mainWrapper); tablesToProcess.forEach(t => t.remove()); }
     });
   }
+
   function wrapSectionContent(doc, headingText, wrapperClass) {
-    const heading = Array.from(doc.querySelectorAll('h1')).find(h => h.textContent.trim().toLowerCase().includes(headingText.toLowerCase()));
+    const heading = Array.from(doc.querySelectorAll('h1')).find(h => headingMatches(h, headingText));
     if (!heading) return;
     const wrapper = document.createElement('div'); wrapper.className = wrapperClass;
     let currentNode = heading.nextElementSibling; const move = [];
@@ -257,14 +307,20 @@ if (window.__CanvasDocxToolsLoaded) {
     move.forEach(el => wrapper.appendChild(el));
     if (wrapper.hasChildNodes()) heading.insertAdjacentElement('afterend', wrapper);
   }
+
   function cleanupHtml(doc) {
     doc.querySelectorAll('p, a').forEach(el => { if (!el.textContent.trim() && !el.children.length) el.remove(); });
     return doc;
   }
+
   function createWeeklyTopicsList(doc) {
     const topicHeaders = doc.querySelectorAll('h1.wk-topic');
     if (topicHeaders.length === 0) return null;
-    const listContainer = document.createElement('div'); listContainer.id = 'wk-topics-list';
+
+    const old = doc.getElementById('wk-topics-list');
+    if (old) old.remove();
+
+    const listContainer = doc.createElement('div'); listContainer.id = 'wk-topics-list';
     const title = document.createElement('h2'); title.textContent = 'Weekly Topics'; listContainer.appendChild(title);
     const ul = document.createElement('ul');
     topicHeaders.forEach(h1 => {
@@ -274,13 +330,16 @@ if (window.__CanvasDocxToolsLoaded) {
     });
     listContainer.appendChild(ul); return listContainer;
   }
+
   function processHtml(rawHtml) {
     const parser = new DOMParser(); let doc = parser.parseFromString(rawHtml, 'text/html');
     const tableStore = stashNestedTables(doc);
+
     APP_CONFIG.topLevelSections.forEach(section => wrapSectionContent(doc, section.name, section.className));
+
     doc.querySelectorAll('h1.wk-topic').forEach(topic => {
       const nextH1 = topic.nextElementSibling;
-      if (nextH1 && nextH1.tagName === 'H1' && nextH1.textContent.trim().toLowerCase().includes('learning objectives')) {
+      if (nextH1 && nextH1.tagName === 'H1' && headingMatches(nextH1, 'Learning Objectives')) {
         const table = nextH1.nextElementSibling;
         if (table && table.tagName === 'TABLE') {
           const wrapper = document.createElement('div'); wrapper.className = 'LO';
@@ -292,15 +351,19 @@ if (window.__CanvasDocxToolsLoaded) {
         }
       }
     });
+
     processContentTables(doc, 'Activities and Resources', 'activities', false);
     processContentTables(doc, 'Assignments', 'assignments', true);
+
     restorePlaceholders(doc, tableStore);
     doc = cleanupHtml(doc);
+
     const weeklyList = createWeeklyTopicsList(doc);
     if (weeklyList) doc.body.prepend(weeklyList);
 
-    // Ensure table borders like your index.html tweak
+    // Keep your original table border attribute behavior (per your request to skip change 7)
     doc.querySelectorAll('table').forEach(tbl => tbl.setAttribute('border','1'));
+
     return doc.body.innerHTML;
   }
 
@@ -341,7 +404,7 @@ if (window.__CanvasDocxToolsLoaded) {
     let html = '<h4>Document Structure Report</h4>';
     if (issuesFound) {
       html += `<p style="color:#dc3545;font-weight:700">Issues detected. Please review recommendations.</p>`;
-      topLevelErrors.forEach(e => html += `<p style=\"color:#dc3545;padding-left:12px\">${e}</p>`);
+      topLevelErrors.forEach(e => html += `<p style="color:#dc3545;padding-left:12px">${e}</p>`);
     } else {
       html += `<p style="color:#28a745;font-weight:700">Document structure looks good!</p>`;
     }
@@ -354,7 +417,7 @@ if (window.__CanvasDocxToolsLoaded) {
     html += '</tbody></table>';
 
     html += '<h5 style="margin-top:10px">Weekly Sections</h5>';
-    if (anyUnwrapped) html += `<p style="color:#dc3545">Unwrapped content found. This will be deleted by "Clean Up".</p>`;
+    if (anyUnwrapped) html += `<p style="color:#dc3545">Unwrapped content found. This will be handled by "Clean Up".</p>`;
     html += '<table><thead><tr><th>Week</th><th>LO</th><th>A&R</th><th>Assignments</th><th>Unwrapped</th></tr></thead><tbody>';
     weeklyReportData.forEach(d => {
       html += `<tr><td>Week ${d.weekNumber}: ${d.cleanText}</td><td>${d.counts.LO}</td><td>${d.counts.activities}</td><td>${d.counts.assignments}</td><td>${d.unwrapped?'1':'0'}</td></tr>`;
@@ -368,20 +431,35 @@ if (window.__CanvasDocxToolsLoaded) {
     return html;
   }
 
+  // Gentle cleanup: wrap stray content into a .misc bucket instead of deleting
+  const CLEANUP_OPTIONS = { mode: 'wrap' }; // 'wrap' or 'delete'
+
   function removeExtraContent(htmlContent) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(htmlContent, 'text/html');
     const body = doc.body;
-    const nodesToRemove = new Set();
-    let lastH1 = null;
-    Array.from(body.children).forEach(node => {
-      if (node.tagName === 'H1') { lastH1 = node; return; }
-      if (!node.matches(APP_CONFIG.allowedWrapperSelectors)) {
-        if (node.nodeType === Node.TEXT_NODE && !node.textContent.trim()) return;
-        nodesToRemove.add(node); if (lastH1) nodesToRemove.add(lastH1);
+
+    const allowed = APP_CONFIG.allowedWrapperSelectors;
+    const nodes = Array.from(body.children);
+    for (const node of nodes) {
+      if (node.tagName === 'H1') continue;
+      if (node.matches(allowed)) continue;
+      if (node.nodeType === Node.TEXT_NODE && !node.textContent.trim()) continue;
+
+      if (CLEANUP_OPTIONS.mode === 'wrap') {
+        let bucket = body.querySelector('.misc');
+        if (!bucket) {
+          bucket = doc.createElement('div');
+          bucket.className = 'misc';
+          const h2 = doc.createElement('h2'); h2.textContent = 'Other Content';
+          bucket.appendChild(h2);
+          body.appendChild(bucket);
+        }
+        bucket.appendChild(node);
+      } else {
+        node.remove();
       }
-    });
-    nodesToRemove.forEach(node => node.remove());
+    }
     return body.innerHTML;
   }
 
@@ -396,24 +474,23 @@ if (window.__CanvasDocxToolsLoaded) {
 .LO { border-color:#7c3aed; background:#f5f3ff; }
 .activities { border-color:#059669; background:#ecfdf5; }
 .assignments { border-color:#ef4444; background:#fef2f2; }
+.misc { border-color:#64748b; background:#f1f5f9; padding: 12px 14px; border-left: 6px solid; margin: 12px 0; }
 #wk-topics-list { border:1px dashed #94a3b8; padding:10px 12px; background:#f8fafc; }
 #wk-topics-list h2 { margin: 0 0 6px; }
 #wk-topics-list ul { margin:0; padding-left: 18px; }
 #wk-topics-list li { margin:2px 0; }
 h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px; }
-.cdes > h2, .plo > h2, .clo > h2, .material > h2, .LO > h2, .activities > h2, .assignments > h2 { margin-top: 0; }
+.cdes > h2, .plo > h2, .clo > h2, .material > h2, .LO > h2, .activities > h2, .assignments > h2, .misc > h2 { margin-top: 0; }
 `;
   const PREVIEW_STYLE_PARENT_ID = 'cdt-preview-styles';
   const PREVIEW_STYLE_IFRAME_ID = 'cdt-preview-styles-editor';
   const STATE = { previewOn: true, iframeDnDAttached: false };
 
   function setPreviewStyles(on) {
-    // Parent page
     let s = document.getElementById(PREVIEW_STYLE_PARENT_ID);
     if (on && !s) { s = document.createElement('style'); s.id = PREVIEW_STYLE_PARENT_ID; s.textContent = SECTION_STYLE_CSS; document.head.appendChild(s); }
     else if (!on && s) { s.remove(); }
 
-    // TinyMCE iframe
     const ed = getEditor();
     if (ed && ed.getDoc) {
       const edDoc = ed.getDoc();
@@ -425,7 +502,6 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
     }
   }
 
-
   function openStyleLegend() {
     const rows = [
       ['cdes','Course Description','#1d4ed8'],
@@ -434,7 +510,8 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
       ['material','Required Course Materials','#f59e0b'],
       ['LO','Learning Objectives','#7c3aed'],
       ['activities','Activities and Resources','#059669'],
-      ['assignments','Assignments','#ef4444']
+      ['assignments','Assignments','#ef4444'],
+      ['misc','Other Content','#64748b']
     ].map(([cls,label,color]) => `<tr><td><code>.${cls}</code></td><td>${label}</td><td><span style="display:inline-block;width:16px;height:16px;background:${color};border-radius:3px;border:1px solid #0002"></span></td></tr>`).join('');
     document.getElementById('cdt-modal-title').textContent = 'Styles Legend';
     document.getElementById('cdt-modal-body').innerHTML = `
@@ -453,18 +530,38 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
   const btnToggleStyles    = document.getElementById('cdt-toggle-styles');
   const btnStyleLegend     = document.getElementById('cdt-style-legend');
   const btnSave            = document.getElementById('cdt-save');
+  const selWrapClass       = document.getElementById('cdt-wrap-class');
+  const btnWrap            = document.getElementById('cdt-wrap');
+
+  // Populate wrapper select
+  const wrapOptions = [
+    ...APP_CONFIG.topLevelSections.map(s => s.className),
+    ...APP_CONFIG.weeklySections.map(s => s.className),
+    'misc'
+  ];
+  selWrapClass.innerHTML = wrapOptions.map(cls => `<option value="${cls}">${cls}</option>`).join('');
 
   let lastPreCleanupHtml = null;
 
   async function convertAndReplace(fileOpt) {
-    if (!fileOpt && (!fileInput.files || !fileInput.files[0])) { alert('Choose a .docx file first, or drop one on the bar.'); return; }
+    await waitForEditor();
     await ensureMammoth();
-    const file = fileOpt || fileInput.files[0];
+
+    const file = fileOpt || (fileInput && fileInput.files && fileInput.files[0]);
+    if (!file) { alert('Choose a .docx file first, or drop one on the bar.'); return; }
     const isDocxByName = /\.docx$/i.test(file.name || '');
     const isDocxByType = /officedocument\.wordprocessingml\.document/.test(file.type || '');
     if (!(isDocxByName || isDocxByType)) { alert('Please provide a .docx file.'); return; }
+
     const arrayBuffer = await file.arrayBuffer();
     const result = await mammoth.convertToHtml({ arrayBuffer }, { styleMap: APP_CONFIG.styleMap });
+
+    if (Array.isArray(result.messages) && result.messages.length) {
+      const warn = result.messages.map(m => `• ${m.message || m.value || String(m)}`).join('\n');
+      console.warn('Mammoth messages:\n' + warn);
+      showToast('Converted with warnings. Check console.');
+    }
+
     const processed = processHtml(result.value);
     setRCEHtml(processed);
     if (fileInput) fileInput.value = '';
@@ -507,9 +604,9 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
     const html = getRCEHtml();
     if (!html) { alert('Editor is empty. Nothing to save.'); return; }
 
-    // Prefer API save (PUT /api/v1/courses/:course_id/pages/:url)
     if (CanvasCtx.courseId && CanvasCtx.pageSlug) {
-      const res = await fetch(`${CanvasCtx.apiBase}/courses/${CanvasCtx.courseId}/pages/${CanvasCtx.pageSlug}`, {
+      const url = `${CanvasCtx.apiBase}/courses/${CanvasCtx.courseId}/pages/${CanvasCtx.pageSlug}`;
+      const res = await fetch(url, {
         method: 'PUT',
         headers: {
           'Content-Type':'application/json',
@@ -518,26 +615,58 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
         },
         body: JSON.stringify({ wiki_page: { body: html, ...(title ? { title } : {}) } })
       });
-      if (!res.ok) throw new Error(`Save failed: ${res.status}`);
+      if (!res.ok) {
+        const t = await res.text().catch(()=> '');
+        throw new Error(`Save failed ${res.status}. ${t.slice(0,240)}`);
+      }
       showToast('Saved to page via API.');
     } else {
-      // Fallback: click Canvas save button if present
       const btn = [...document.querySelectorAll('button, input[type=submit]')].find(b => /save/i.test(b.textContent || b.value || ''));
       if (btn) { btn.click(); showToast('Triggered Canvas Save button.'); }
       else { alert('Could not determine page context to save.'); }
     }
   });
 
+  // ---- Wrap current selection with class ----
+  function wrapSelectionWithClass(cls) {
+    const ed = getEditor();
+    if (!ed) { alert('Editor not ready.'); return; }
+    const html = ed.selection && ed.selection.getContent({ format: 'html' });
+    if (!html || !html.trim()) {
+      alert('Select some content in the editor first.');
+      return;
+    }
+    const wrapped = `<div class="${cls}">${html}</div>`;
+    ed.selection.setContent(wrapped, { format: 'html' });
+    setPreviewStyles(STATE.previewOn);
+    showToast(`Wrapped selection in .${cls}`);
+  }
+
   // ---- Drag & Drop wiring ----
   function preventDefaults(e){ e.preventDefault(); e.stopPropagation(); }
   function highlight(){ root.classList.add('drop-active'); }
   function unhighlight(){ root.classList.remove('drop-active'); }
-  function handleDrop(e){ preventDefaults(e); unhighlight();
-    const dt = e.dataTransfer; if (!dt || !dt.files || !dt.files.length) return;
-    const file = [...dt.files].find(f => /\.docx$/i.test(f.name));
+
+  function firstDocxFileFromDataTransfer(dt) {
+    if (!dt) return null;
+    if (dt.items && dt.items.length) {
+      for (const it of dt.items) {
+        if (it.kind === 'file') {
+          const f = it.getAsFile();
+          if (f && /\.docx$/i.test(f.name)) return f;
+        }
+      }
+    }
+    return [...(dt.files || [])].find(f => /\.docx$/i.test(f.name)) || null;
+  }
+
+  function handleDrop(e){ 
+    preventDefaults(e); unhighlight();
+    const file = firstDocxFileFromDataTransfer(e.dataTransfer);
     if (!file) { showToast('Drop a .docx file.'); return; }
     convertAndReplaceWithSpinner(file);
   }
+
   ;['dragenter','dragover'].forEach(ev => root.addEventListener(ev, (e)=>{preventDefaults(e); highlight();}));
   ;['dragleave','drop'].forEach(ev => root.addEventListener(ev, (e)=>{preventDefaults(e); if(ev==='dragleave') unhighlight();}));
   root.addEventListener('drop', handleDrop);
@@ -552,8 +681,7 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
     ['dragenter','dragover'].forEach(ev => body.addEventListener(ev, (e)=>{ preventDefaults(e); highlight(); }));
     ['dragleave','drop'].forEach(ev => body.addEventListener(ev, (e)=>{ preventDefaults(e); if(ev==='dragleave') unhighlight(); }));
     body.addEventListener('drop', (e)=>{
-      const dt = e.dataTransfer; if (!dt || !dt.files || !dt.files.length) return; unhighlight();
-      const file = [...dt.files].find(f => /\.docx$/i.test(f.name));
+      const file = firstDocxFileFromDataTransfer(e.dataTransfer);
       if (!file) { ed.windowManager && ed.windowManager.alert ? ed.windowManager.alert('Drop a .docx file.') : showToast('Drop a .docx file.'); return; }
       convertAndReplaceWithSpinner(file);
     });
@@ -572,15 +700,14 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
         convertAndReplaceWithSpinner();
       }
     });
-  
   }
 
   btnReport.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); runReport(); });
   btnCleanup.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation();
     document.getElementById('cdt-modal-title').textContent = 'Confirm Cleanup';
     document.getElementById('cdt-modal-body').innerHTML = `
-      <p>This will remove any content (and its heading) that is not in a standard section like
-      "Learning Objectives", "Activities and Resources", or "Assignments".</p>
+      <p>This will move any content that is not in a standard section like
+      "Learning Objectives", "Activities and Resources", or "Assignments" into an "Other Content" bucket.</p>
       <p>You can undo immediately after.</p>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
         <button class="btn gray" type="button" id="cdt-cancel-clean">Cancel</button>
@@ -602,9 +729,25 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
   btnStyleLegend.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); openStyleLegend(); });
   btnSave.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); saveToPage(); });
 
+  btnWrap.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); wrapSelectionWithClass(selWrapClass.value); });
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', e => {
+    if (!e.ctrlKey || !e.altKey) return;
+    const k = e.key.toLowerCase();
+    if (k === 's') { e.preventDefault(); btnSave.click(); }
+    if (k === 'r') { e.preventDefault(); btnReport.click(); }
+    if (k === 'p') { e.preventDefault(); btnToggleStyles.click(); }
+    if (k === 'w') { e.preventDefault(); btnWrap.click(); }
+  });
+
   // Start with preview styles ON
   setPreviewStyles(true);
 
-  console.log('Canvas DOCX → RCE Toolbelt loaded (v1.4.1).');
+  // Make sure editor exists before first use
+  waitForEditor();
+
+  console.log('Canvas DOCX → RCE Toolbelt loaded (v1.5.0).');
 }
 // === end =====================================================================
+```
