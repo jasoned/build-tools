@@ -1,6 +1,3 @@
-Got it. Here is a full drop-in v1.5.0 that applies everything except 1 and 7, and adds “wrap selection with class” from a dropdown.
-
-```js
 // === Canvas DOCX → RCE Toolbelt =============================================
 // PASTE THIS IN THE BROWSER CONSOLE WHILE EDITING A CANVAS PAGE
 // It adds a floating UI above the RCE to upload/convert/process DOCX content,
@@ -750,4 +747,3 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
   console.log('Canvas DOCX → RCE Toolbelt loaded (v1.5.0).');
 }
 // === end =====================================================================
-```
