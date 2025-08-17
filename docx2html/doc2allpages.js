@@ -3,11 +3,9 @@
 // It adds a floating UI above the RCE to upload/convert/process DOCX content,
 // run your post-processing tools on current content, preview styles,
 // and save back via API. Now supports drag & drop of .docx files and
-// wrapping the current selection in a section class.
+// wrapping the current selection in a section class, plus Find/Replace.
 //
-// Version: 1.5.0 (editor wait + safer matching + gentler cleanup + DnD filter +
-// idempotent topics + MutationObserver preview reapply + keyboard shortcuts +
-// better save errors + selection wrapper UI)
+// Version: 1.6.0 (idempotent cleanup + Find/Replace UI)
 //
 // -----------------------------------------------------------------------------
 // 0) Helpers: CSRF + URL context  [UNCHANGED FROM YOUR REQUEST]
@@ -82,6 +80,14 @@ if (window.__CanvasDocxToolsLoaded) {
 #cdt-modal .btn.gray { background:#6c757d; }
 #cdt-modal table { border-collapse:collapse; width:100%; font-size:12px; }
 #cdt-modal th, #cdt-modal td { border:1px solid #cfd4da; padding:6px; text-align:left; }
+
+/* Find/Replace inputs */
+#cdt-fr-form { display:grid; grid-template-columns: 1fr 1fr; gap:8px; align-items:end; margin-bottom:8px; }
+#cdt-fr-form .full { grid-column: 1 / -1; }
+#cdt-fr-form label { display:block; font-size:12px; color:#2d3748; margin-bottom:2px; }
+#cdt-fr-form input[type="text"] { width:100%; padding:6px 8px; font-size:13px; border:1px solid #cbd5e0; border-radius:6px; }
+#cdt-fr-form .opts { display:flex; gap:12px; align-items:center; font-size:12px; }
+#cdt-fr-actions { display:flex; gap:8px; justify-content:flex-end; }
 `;
   const style = document.createElement('style');
   style.textContent = css;
@@ -105,6 +111,7 @@ if (window.__CanvasDocxToolsLoaded) {
         <select id="cdt-wrap-class" title="Select wrapper class for highlighted content"></select>
         <button class="cdt-btn" type="button" id="cdt-wrap">Apply</button>
 
+        <button class="cdt-btn secondary" type="button" id="cdt-find-replace">Find/Replace</button>
         <button class="cdt-btn secondary" type="button" id="cdt-toggle-styles">Preview Styles: On</button>
         <button class="cdt-btn secondary" type="button" id="cdt-style-legend">Styles Legend</button>
         <button class="cdt-btn success" type="button" id="cdt-save">Save to Page</button>
@@ -358,7 +365,7 @@ if (window.__CanvasDocxToolsLoaded) {
     const weeklyList = createWeeklyTopicsList(doc);
     if (weeklyList) doc.body.prepend(weeklyList);
 
-    // Keep your original table border attribute behavior (per your request to skip change 7)
+    // Keep original table border attribute
     doc.querySelectorAll('table').forEach(tbl => tbl.setAttribute('border','1'));
 
     return doc.body.innerHTML;
@@ -428,7 +435,7 @@ if (window.__CanvasDocxToolsLoaded) {
     return html;
   }
 
-  // Gentle cleanup: wrap stray content into a .misc bucket instead of deleting
+  // Gentle cleanup: idempotent wrapper. Never create nested .misc or move nodes already inside .misc.
   const CLEANUP_OPTIONS = { mode: 'wrap' }; // 'wrap' or 'delete'
 
   function removeExtraContent(htmlContent) {
@@ -437,21 +444,30 @@ if (window.__CanvasDocxToolsLoaded) {
     const body = doc.body;
 
     const allowed = APP_CONFIG.allowedWrapperSelectors;
+
+    // Ensure a single .misc bucket exists and do not create another
+    let bucket = body.querySelector(':scope > .misc');
+    if (!bucket && CLEANUP_OPTIONS.mode === 'wrap') {
+      bucket = doc.createElement('div');
+      bucket.className = 'misc';
+      const h2 = doc.createElement('h2'); h2.textContent = 'Other Content';
+      bucket.appendChild(h2);
+      body.appendChild(bucket);
+    }
+
+    // Only inspect direct children of body to avoid re-wrapping inside sections
     const nodes = Array.from(body.children);
     for (const node of nodes) {
+      // Skip headings, allowed wrappers, and the bucket itself
       if (node.tagName === 'H1') continue;
       if (node.matches(allowed)) continue;
-      if (node.nodeType === Node.TEXT_NODE && !node.textContent.trim()) continue;
+      if (node === bucket) continue;
+      // Skip empty text-like blocks
+      if (node.nodeType === Node.ELEMENT_NODE && node.textContent.trim() === '' && node.children.length === 0) { node.remove(); continue; }
+      // If already inside .misc for some reason, skip
+      if (node.closest('.misc')) continue;
 
       if (CLEANUP_OPTIONS.mode === 'wrap') {
-        let bucket = body.querySelector('.misc');
-        if (!bucket) {
-          bucket = doc.createElement('div');
-          bucket.className = 'misc';
-          const h2 = doc.createElement('h2'); h2.textContent = 'Other Content';
-          bucket.appendChild(h2);
-          body.appendChild(bucket);
-        }
         bucket.appendChild(node);
       } else {
         node.remove();
@@ -529,6 +545,7 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
   const btnSave            = document.getElementById('cdt-save');
   const selWrapClass       = document.getElementById('cdt-wrap-class');
   const btnWrap            = document.getElementById('cdt-wrap');
+  const btnFindReplace     = document.getElementById('cdt-find-replace');
 
   // Populate wrapper select
   const wrapOptions = [
@@ -562,7 +579,7 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
     const processed = processHtml(result.value);
     setRCEHtml(processed);
     if (fileInput) fileInput.value = '';
-    showToast('Converted & inserted into the RCE.');
+    showToast('Converted and inserted into the RCE.');
   }
   const convertAndReplaceWithSpinner = withSpinner(convertAndReplace);
 
@@ -657,7 +674,7 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
     return [...(dt.files || [])].find(f => /\.docx$/i.test(f.name)) || null;
   }
 
-  function handleDrop(e){ 
+  function handleDrop(e){
     preventDefaults(e); unhighlight();
     const file = firstDocxFileFromDataTransfer(e.dataTransfer);
     if (!file) { showToast('Drop a .docx file.'); return; }
@@ -690,7 +707,6 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
 
   // ---------------------------------------------------------------------------
   // 6) Wire up buttons (+ style controls)
-  // Auto-convert when a file is selected
   if (fileInput) {
     fileInput.addEventListener('change', (e) => {
       if (fileInput.files && fileInput.files[0]) {
@@ -705,7 +721,7 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
     document.getElementById('cdt-modal-body').innerHTML = `
       <p>This will move any content that is not in a standard section like
       "Learning Objectives", "Activities and Resources", or "Assignments" into an "Other Content" bucket.</p>
-      <p>You can undo immediately after.</p>
+      <p>Cleanup is idempotent and will not create nested "Other Content" sections.</p>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
         <button class="btn gray" type="button" id="cdt-cancel-clean">Cancel</button>
         <button class="btn" type="button" id="cdt-confirm-clean">Yes, Clean Up</button>
@@ -728,6 +744,87 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
 
   btnWrap.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); wrapSelectionWithClass(selWrapClass.value); });
 
+  // ---- Find/Replace UI ----
+  function openFindReplaceModal() {
+    document.getElementById('cdt-modal-title').textContent = 'Find and Replace (HTML)';
+    document.getElementById('cdt-modal-body').innerHTML = `
+      <form id="cdt-fr-form">
+        <div class="full">
+          <label for="cdt-fr-find">Find</label>
+          <input type="text" id="cdt-fr-find" placeholder="text or regex">
+        </div>
+        <div class="full">
+          <label for="cdt-fr-replace">Replace with</label>
+          <input type="text" id="cdt-fr-replace" placeholder="replacement">
+        </div>
+        <div class="full opts">
+          <label><input type="checkbox" id="cdt-fr-case"> Case sensitive</label>
+          <label><input type="checkbox" id="cdt-fr-word"> Whole word</label>
+          <label><input type="checkbox" id="cdt-fr-regex"> Regex</label>
+          <span id="cdt-fr-count" style="margin-left:auto;color:#4a5568"></span>
+        </div>
+        <div id="cdt-fr-actions" class="full">
+          <button class="btn" type="button" id="cdt-fr-replace-first">Replace First</button>
+          <button class="btn" type="button" id="cdt-fr-replace-all">Replace All</button>
+        </div>
+      </form>
+    `;
+    modal.style.display = 'flex';
+
+    const $find = document.getElementById('cdt-fr-find');
+    const $rep  = document.getElementById('cdt-fr-replace');
+    const $case = document.getElementById('cdt-fr-case');
+    const $word = document.getElementById('cdt-fr-word');
+    const $regex= document.getElementById('cdt-fr-regex');
+    const $count= document.getElementById('cdt-fr-count');
+
+    function escapeRegex(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+    function buildRe() {
+      let pattern = $find.value || '';
+      if (!pattern) return null;
+      if (!$regex.checked) {
+        pattern = escapeRegex(pattern);
+        if ($word.checked) pattern = `\\b${pattern}\\b`;
+      } else {
+        if ($word.checked) pattern = `\\b(?:${pattern})\\b`;
+      }
+      const flags = $case.checked ? 'g' : 'gi';
+      try { return new RegExp(pattern, flags); } catch(e) { return null; }
+    }
+    function updateCount() {
+      const html = getRCEHtml() || '';
+      const re = buildRe();
+      if (!re) { $count.textContent = ''; return; }
+      const matches = html.match(re);
+      $count.textContent = matches ? `${matches.length} match${matches.length===1?'':'es'}` : '0 matches';
+    }
+    $find.addEventListener('input', updateCount);
+    $rep.addEventListener('input', updateCount);
+    $case.addEventListener('change', updateCount);
+    $word.addEventListener('change', updateCount);
+    $regex.addEventListener('change', updateCount);
+    setTimeout(()=>{ $find.focus(); updateCount(); }, 0);
+
+    function replaceImpl(all=false){
+      const html = getRCEHtml() || '';
+      const re = buildRe();
+      if (!re) { alert('Enter a valid find pattern.'); return; }
+      const replacement = $rep.value ?? '';
+      if (!re.test(html)) { showToast('No matches.'); return; }
+      const newHtml = all ? html.replace(re, replacement) : html.replace(re, replacement);
+      setRCEHtml(newHtml);
+      const count = (html.match(re) || []).length;
+      if (all) showToast(`Replaced ${count} occurrence${count===1?'':'s'}.`);
+      else showToast(`Replaced 1 occurrence.`);
+      updateCount();
+    }
+
+    document.getElementById('cdt-fr-replace-first').onclick = () => replaceImpl(false);
+    document.getElementById('cdt-fr-replace-all').onclick   = () => replaceImpl(true);
+  }
+
+  btnFindReplace.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); openFindReplaceModal(); });
+
   // Keyboard shortcuts
   document.addEventListener('keydown', e => {
     if (!e.ctrlKey || !e.altKey) return;
@@ -736,6 +833,7 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
     if (k === 'r') { e.preventDefault(); btnReport.click(); }
     if (k === 'p') { e.preventDefault(); btnToggleStyles.click(); }
     if (k === 'w') { e.preventDefault(); btnWrap.click(); }
+    if (k === 'f') { e.preventDefault(); btnFindReplace.click(); }
   });
 
   // Start with preview styles ON
@@ -744,6 +842,6 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
   // Make sure editor exists before first use
   waitForEditor();
 
-  console.log('Canvas DOCX → RCE Toolbelt loaded (v1.5.0).');
+  console.log('Canvas DOCX → RCE Toolbelt loaded (v1.6.0).');
 }
 // === end =====================================================================
