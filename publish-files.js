@@ -3,7 +3,6 @@
   // Canvas Bulk File Publisher UI
   // ===============================
 
-  // --- Small helper: CSRF token from cookies (Canvas requirement for PUT/POST/DELETE) ---
   function getCsrfToken() {
     const csrfRegex = new RegExp('^_csrf_token=(.*)$');
     let csrf;
@@ -19,7 +18,6 @@
     return csrf;
   }
 
-  // --- Derive course ID from URL ---
   const courseIdMatch = location.pathname.match(/\/courses\/(\d+)/);
   if (!courseIdMatch) {
     alert("Could not detect course ID from this page. Please run this from within a Canvas course.");
@@ -43,12 +41,16 @@
           <div style="font-size: 13px; color: #666;">Course ID: ${COURSE_ID}</div>
         </div>
         <div style="padding: 16px 18px;">
-          <div id="bulk-status" style="font-size: 14px; margin-bottom: 10px;">Starting…</div>
-          <div style="display:flex; align-items:center; gap:10px; margin: 10px 0 4px;">
+          <div id="bulk-status" style="font-size: 14px; margin-bottom: 10px;">Ready to run</div>
+          <div id="bulk-controls" style="margin:12px 0;">
+            <button id="bulk-confirm" style="padding: 10px 16px; border: 0; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; font-size:14px;">Confirm and Run</button>
+            <button id="bulk-cancel" style="padding: 10px 16px; border: 1px solid #ddd; border-radius: 8px; background: #fff; cursor: pointer; margin-left:8px;">Cancel</button>
+          </div>
+          <div style="display:none; align-items:center; gap:10px; margin: 10px 0 4px;" id="bulk-progress-wrap">
             <div class="spinner" style="
               width: 18px; height: 18px; border: 3px solid #ddd; border-top-color: #3b82f6;
               border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
-            <div id="bulk-phase" style="font-size: 14px;">Preparing</div>
+            <div id="bulk-phase" style="font-size: 14px;">Waiting…</div>
           </div>
           <div style="height: 10px; background: #f0f0f0; border-radius: 999px; overflow: hidden; margin: 8px 0 2px;">
             <div id="bulk-bar" style="height: 100%; width: 0%; background: #3b82f6; transition: width .2s;"></div>
@@ -57,7 +59,6 @@
           <div id="bulk-log" style="height: 180px; overflow: auto; background: #fafafa; border: 1px solid #eee; border-radius: 8px; padding: 8px; font-size: 12px; line-height: 1.4;"></div>
         </div>
         <div style="display:flex; justify-content:flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid #eee;">
-          <button id="bulk-cancel" style="display:none; padding: 8px 12px; border: 1px solid #ddd; border-radius: 8px; background: #fff; cursor: pointer;">Cancel</button>
           <button id="bulk-close" style="display:none; padding: 8px 12px; border: 0; border-radius: 8px; background: #16a34a; color: #fff; cursor: pointer;">Close</button>
         </div>
       </div>
@@ -78,6 +79,9 @@
   const $counts = ui.querySelector('#bulk-counts');
   const $log    = ui.querySelector('#bulk-log');
   const $close  = ui.querySelector('#bulk-close');
+  const $confirm= ui.querySelector('#bulk-confirm');
+  const $cancel = ui.querySelector('#bulk-cancel');
+  const $progressWrap = ui.querySelector('#bulk-progress-wrap');
 
   const log = (msg, cls = 'muted') => {
     const line = document.createElement('div');
@@ -93,7 +97,7 @@
     $bar.style.width = pct + '%';
     $counts.textContent = `${done} / ${total}`;
   };
-  const finish = (msg, ok = true) => {
+  const finish = (msg) => {
     setPhase('Complete');
     setStatus(msg);
     ui.querySelector('.spinner').style.display = 'none';
@@ -101,14 +105,11 @@
     $close.onclick = () => ui.remove();
   };
 
-  // --- HTTP helpers with pagination support ---
   const CSRF = getCsrfToken();
   const jsonHeaders = { 'X-CSRF-Token': CSRF, 'Accept': 'application/json' };
-  // Canvas prefers form-encoded for many writes
   const asForm = obj => new URLSearchParams(Object.entries(obj).map(([k,v]) => [k, String(v)]));
 
   async function apiGetAll(url) {
-    // Follows Link rel="next" and aggregates all pages
     let results = [];
     let next = url.includes('?') ? url + '&per_page=100' : url + '?per_page=100';
     while (next) {
@@ -116,7 +117,6 @@
       if (!res.ok) throw new Error(`GET ${next} failed ${res.status}`);
       const data = await res.json();
       results = results.concat(data);
-      // Parse Link header
       const link = res.headers.get('Link');
       if (!link) { next = null; break; }
       const m = link.split(',').map(s => s.trim()).find(s => s.endsWith('rel="next"'));
@@ -139,25 +139,21 @@
     return res.json().catch(()=> ({}));
   }
 
-  // --- Main flow ---
-  (async () => {
+  async function runProcess() {
     try {
+      $progressWrap.style.display = 'flex';
       setStatus('Changing course setting: usage_rights_required = false');
       setPhase('Updating course settings');
 
-      // 1) Disable usage rights requirement for this course
-      //    PUT /api/v1/courses/:course_id/settings  with usage_rights_required=false
       await apiPut(`${BASE}/courses/${COURSE_ID}/settings`, { usage_rights_required: false });
       log('usage_rights_required disabled for this course.', 'ok');
 
-      // 2) Unhide and unlock all folders first (so students can see files in those folders)
       setPhase('Collecting folders');
       setStatus('Listing all folders in the course');
       const folders = await apiGetAll(`${BASE}/courses/${COURSE_ID}/folders`);
       log(`Found ${folders.length} folders`);
 
       setPhase('Publishing folders');
-      setStatus('Ensuring all folders are visible');
       let foldersDone = 0;
       for (const f of folders) {
         const needsChange = (f.hidden === true) || (f.locked === true);
@@ -175,16 +171,12 @@
         setProgress(foldersDone, folders.length || 1);
       }
 
-      // 3) Unhide and unlock all files
       setPhase('Collecting files');
-      setStatus('Listing all files in the course');
       const files = await apiGetAll(`${BASE}/courses/${COURSE_ID}/files`);
       log(`Found ${files.length} files`);
 
       setPhase('Publishing files');
-      setStatus('Making files visible to students');
       let filesDone = 0, changed = 0, skipped = 0, errors = 0;
-
       for (const file of files) {
         const needsChange = (file.hidden === true) || (file.locked === true);
         if (needsChange) {
@@ -201,11 +193,9 @@
           log(`File already visible: ${file.display_name || file.filename || file.id}`, 'muted');
         }
         filesDone++;
-        // progress across files only for a smoother bar during the heavy step
         setProgress(filesDone, files.length || 1);
       }
 
-      // Final summary
       log(`Folders processed: ${folders.length}`, 'ok');
       log(`Files processed: ${files.length} | changed: ${changed} | skipped: ${skipped} | errors: ${errors}`, errors ? 'warn' : 'ok');
 
@@ -213,7 +203,16 @@
     } catch (err) {
       console.error(err);
       log(`Fatal error: ${err.message}`, 'err');
-      finish('Stopped due to an error. See the log above.', false);
+      finish('Stopped due to an error. See the log above.');
     }
-  })();
+  }
+
+  // Hook up buttons
+  $confirm.onclick = () => {
+    $confirm.style.display = 'none';
+    $cancel.style.display = 'none';
+    runProcess();
+  };
+  $cancel.onclick = () => ui.remove();
+
 })();
