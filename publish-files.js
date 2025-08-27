@@ -1,6 +1,6 @@
 (() => {
   // ===============================
-  // Canvas Bulk File Publisher UI
+  // Canvas Bulk File Publisher UI v1
   // ===============================
 
   function getCsrfToken() {
