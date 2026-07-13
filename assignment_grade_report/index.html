@@ -1,0 +1,749 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Install and use the Canvas Assignment Grade Report bookmarklet.">
+  <title>Canvas Assignment Grade Report — Bookmarklet Setup</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --navy: #003865;
+      --navy-deep: #002846;
+      --blue: #0b69a3;
+      --sky: #eaf5fb;
+      --gold: #f2a900;
+      --gold-soft: #fff4d6;
+      --ink: #172033;
+      --muted: #5e6c82;
+      --line: #d7e0ea;
+      --paper: #ffffff;
+      --canvas: #f3f7fa;
+      --success: #13795b;
+      --shadow: 0 18px 55px rgba(0, 40, 70, 0.12);
+      --radius: 20px;
+    }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 85% 0%, rgba(242, 169, 0, 0.16), transparent 28rem),
+        linear-gradient(180deg, #eef6fb 0, var(--canvas) 30rem);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.6;
+    }
+
+    a {
+      color: var(--blue);
+    }
+
+    a:focus-visible,
+    button:focus-visible {
+      outline: 3px solid rgba(242, 169, 0, 0.72);
+      outline-offset: 3px;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: 64px 24px 106px;
+      background: linear-gradient(135deg, var(--navy-deep), var(--navy) 62%, #075d86);
+      color: #fff;
+    }
+
+    .hero::before,
+    .hero::after {
+      content: "";
+      position: absolute;
+      border-radius: 999px;
+      pointer-events: none;
+    }
+
+    .hero::before {
+      width: 440px;
+      height: 440px;
+      right: -190px;
+      top: -230px;
+      border: 70px solid rgba(255, 255, 255, 0.055);
+    }
+
+    .hero::after {
+      width: 220px;
+      height: 220px;
+      left: -95px;
+      bottom: -120px;
+      background: rgba(242, 169, 0, 0.16);
+    }
+
+    .hero-inner,
+    main,
+    footer {
+      width: min(1040px, 100%);
+      margin-inline: auto;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 18px;
+      padding: 6px 11px;
+      border: 1px solid rgba(255, 255, 255, 0.24);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      font-size: 0.76rem;
+      font-weight: 750;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--gold);
+      content: "";
+    }
+
+    h1 {
+      max-width: 760px;
+      margin: 0;
+      font-size: clamp(2.25rem, 6vw, 4.7rem);
+      line-height: 0.98;
+      letter-spacing: -0.055em;
+    }
+
+    .hero p {
+      max-width: 690px;
+      margin: 24px 0 0;
+      color: rgba(255, 255, 255, 0.8);
+      font-size: clamp(1rem, 2vw, 1.18rem);
+    }
+
+    main {
+      position: relative;
+      z-index: 1;
+      margin-top: -62px;
+      padding: 0 20px 64px;
+    }
+
+    .card {
+      border: 1px solid rgba(0, 56, 101, 0.1);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.97);
+      box-shadow: var(--shadow);
+    }
+
+    .install-card {
+      padding: clamp(24px, 5vw, 48px);
+    }
+
+    .section-kicker {
+      margin: 0 0 6px;
+      color: var(--blue);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    h2 {
+      margin: 0;
+      color: var(--navy-deep);
+      font-size: clamp(1.55rem, 3vw, 2.25rem);
+      line-height: 1.15;
+      letter-spacing: -0.03em;
+    }
+
+    .lede {
+      max-width: 730px;
+      margin: 12px 0 0;
+      color: var(--muted);
+    }
+
+    .install-zone {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(260px, 0.9fr);
+      gap: 24px;
+      margin-top: 30px;
+    }
+
+    .drag-panel,
+    .shortcut-panel {
+      min-width: 0;
+      padding: 24px;
+      border-radius: 16px;
+    }
+
+    .drag-panel {
+      border: 2px dashed #a8bdd0;
+      background: linear-gradient(145deg, #f8fbfd, var(--sky));
+      text-align: center;
+    }
+
+    .drag-label {
+      display: block;
+      margin-bottom: 14px;
+      color: var(--muted);
+      font-size: 0.84rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .bookmarklet {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      min-height: 52px;
+      padding: 13px 22px;
+      border: 0;
+      border-radius: 12px;
+      background: linear-gradient(135deg, var(--navy), var(--blue));
+      box-shadow: 0 10px 24px rgba(0, 56, 101, 0.22);
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 800;
+      text-decoration: none;
+      cursor: grab;
+      transition: transform 160ms ease, box-shadow 160ms ease;
+      user-select: none;
+    }
+
+    .bookmarklet:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 14px 30px rgba(0, 56, 101, 0.28);
+    }
+
+    .bookmarklet::before {
+      content: "★";
+      color: #ffd66b;
+    }
+
+    .drag-help {
+      margin: 14px auto 0;
+      max-width: 430px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .shortcut-panel {
+      background: var(--navy-deep);
+      color: #fff;
+    }
+
+    .shortcut-panel h3 {
+      margin: 0 0 12px;
+      font-size: 1.03rem;
+    }
+
+    .shortcut-panel p {
+      margin: 10px 0;
+      color: rgba(255, 255, 255, 0.76);
+      font-size: 0.9rem;
+    }
+
+    kbd {
+      display: inline-block;
+      min-width: 28px;
+      margin: 0 2px;
+      padding: 2px 7px;
+      border: 1px solid rgba(255, 255, 255, 0.32);
+      border-bottom-width: 3px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.11);
+      color: #fff;
+      font: 700 0.78rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+
+    .manual-install {
+      margin-top: 26px;
+      padding-top: 24px;
+      border-top: 1px solid var(--line);
+    }
+
+    .manual-install h3 {
+      margin: 0 0 8px;
+      color: var(--navy-deep);
+      font-size: 1.05rem;
+    }
+
+    .manual-install p {
+      margin: 0 0 13px;
+      color: var(--muted);
+    }
+
+    .code-row {
+      display: flex;
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .code-row code {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      padding: 13px 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #f7f9fb;
+      color: #39485b;
+      font: 0.8rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .copy-button {
+      flex: 0 0 auto;
+      padding: 11px 16px;
+      border: 1px solid var(--navy);
+      border-radius: 10px;
+      background: #fff;
+      color: var(--navy);
+      font: inherit;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    .copy-button:hover {
+      background: var(--sky);
+    }
+
+    .content-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+      gap: 22px;
+      margin-top: 22px;
+    }
+
+    .content-card {
+      padding: clamp(24px, 4vw, 36px);
+      box-shadow: 0 10px 34px rgba(0, 40, 70, 0.07);
+    }
+
+    .steps {
+      display: grid;
+      gap: 0;
+      margin: 26px 0 0;
+      padding: 0;
+      list-style: none;
+      counter-reset: report-step;
+    }
+
+    .steps li {
+      position: relative;
+      min-height: 68px;
+      padding: 0 0 25px 58px;
+      counter-increment: report-step;
+    }
+
+    .steps li:not(:last-child)::after {
+      position: absolute;
+      left: 20px;
+      top: 41px;
+      bottom: 0;
+      width: 2px;
+      background: #d8e5ee;
+      content: "";
+    }
+
+    .steps li::before {
+      position: absolute;
+      left: 0;
+      top: 0;
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--navy);
+      color: #fff;
+      content: counter(report-step);
+      font-weight: 850;
+    }
+
+    .steps strong {
+      display: block;
+      margin-bottom: 2px;
+      color: var(--navy-deep);
+    }
+
+    .steps span {
+      color: var(--muted);
+    }
+
+    .note-stack {
+      display: grid;
+      gap: 14px;
+      margin-top: 24px;
+    }
+
+    .note {
+      padding: 17px 18px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #f9fbfc;
+    }
+
+    .note strong {
+      display: block;
+      margin-bottom: 3px;
+      color: var(--navy-deep);
+    }
+
+    .note p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .note.highlight {
+      border-color: #efd38f;
+      background: var(--gold-soft);
+    }
+
+    .privacy {
+      margin-top: 22px;
+      padding: 18px 20px;
+      border-left: 4px solid var(--success);
+      border-radius: 0 12px 12px 0;
+      background: #edf8f4;
+      color: #29584a;
+      font-size: 0.92rem;
+    }
+
+    .troubleshooting {
+      margin-top: 22px;
+      padding: clamp(24px, 4vw, 36px);
+      box-shadow: 0 10px 34px rgba(0, 40, 70, 0.07);
+    }
+
+    details {
+      border-bottom: 1px solid var(--line);
+    }
+
+    details:last-child {
+      border-bottom: 0;
+    }
+
+    summary {
+      padding: 16px 4px;
+      color: var(--navy-deep);
+      font-weight: 780;
+      cursor: pointer;
+    }
+
+    details p {
+      margin: -4px 4px 18px;
+      color: var(--muted);
+    }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 24px 20px 40px;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    footer p {
+      margin: 0;
+    }
+
+    footer nav {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .toast {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      z-index: 20;
+      max-width: min(360px, calc(100vw - 40px));
+      padding: 12px 16px;
+      border-radius: 10px;
+      background: var(--navy-deep);
+      box-shadow: var(--shadow);
+      color: #fff;
+      font-weight: 700;
+      opacity: 0;
+      transform: translateY(14px);
+      transition: opacity 160ms ease, transform 160ms ease;
+      pointer-events: none;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    @media (max-width: 760px) {
+      .hero {
+        padding-top: 46px;
+      }
+
+      .install-zone,
+      .content-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .code-row {
+        flex-direction: column;
+      }
+
+      .copy-button {
+        min-height: 46px;
+      }
+
+      footer {
+        flex-direction: column;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-inner">
+      <div class="eyebrow">Canvas admin utility</div>
+      <h1>Assignment Grade Report</h1>
+      <p>
+        Install one bookmark, choose enrollment terms and courses in Canvas,
+        and download assignment-level grades as a CSV.
+      </p>
+    </div>
+  </header>
+
+  <main>
+    <section class="card install-card" aria-labelledby="install-heading">
+      <p class="section-kicker">Quick installation</p>
+      <h2 id="install-heading">Drag it once. Use it whenever you need it.</h2>
+      <p class="lede">
+        The bookmarklet loads the current report script from GitHub Pages, so future
+        script updates are available without reinstalling the bookmark.
+      </p>
+
+      <div class="install-zone">
+        <div class="drag-panel">
+          <span class="drag-label">Drag this button to your bookmarks bar</span>
+          <a
+            id="bookmarklet"
+            class="bookmarklet"
+            href="javascript:(function(){var d=document,s=d.createElement('script');s.src='https://jasoned.github.io/build-tools/assignment_grade_report/canvas_assignment_grade_report.js?v='+Date.now();s.onload=function(){s.remove();};s.onerror=function(){s.remove();alert('The Canvas Assignment Grade Report could not be loaded. Check your connection and try again.');};(d.head||d.documentElement).appendChild(s);}());"
+            title="Drag this link to your bookmarks bar"
+          >
+            Canvas Grade Report
+          </a>
+          <p class="drag-help">
+            Do not click the button on this page. Drag it onto the bookmarks bar,
+            then click it while you are signed in to Canvas.
+          </p>
+        </div>
+
+        <aside class="shortcut-panel" aria-label="Show the bookmarks bar">
+          <h3>Don’t see the bookmarks bar?</h3>
+          <p>
+            Windows or ChromeOS:
+            <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>B</kbd>
+          </p>
+          <p>
+            macOS:
+            <kbd>⌘</kbd> + <kbd>Shift</kbd> + <kbd>B</kbd>
+          </p>
+          <p>You can use the same bookmark in Chrome, Edge, Firefox, or Safari.</p>
+        </aside>
+      </div>
+
+      <div class="manual-install">
+        <h3>Manual installation</h3>
+        <p>
+          Create a new bookmark named <strong>Canvas Grade Report</strong>, then paste
+          the copied bookmarklet into the bookmark’s URL or Location field.
+        </p>
+        <div class="code-row">
+          <code id="bookmarklet-code" aria-label="Bookmarklet code"></code>
+          <button id="copy-button" class="copy-button" type="button">
+            Copy bookmarklet
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <div class="content-grid">
+      <section class="card content-card" aria-labelledby="use-heading">
+        <p class="section-kicker">Report workflow</p>
+        <h2 id="use-heading">How to use it</h2>
+        <ol class="steps">
+          <li>
+            <strong>Open Canvas</strong>
+            <span>Sign in and open any normal Canvas page, such as the Dashboard.</span>
+          </li>
+          <li>
+            <strong>Launch the report</strong>
+            <span>Click <em>Canvas Grade Report</em> in your bookmarks bar and wait for the terms to load.</span>
+          </li>
+          <li>
+            <strong>Choose the scope</strong>
+            <span>Enter at least three characters from the course code and select one or more enrollment terms.</span>
+          </li>
+          <li>
+            <strong>Review matched courses</strong>
+            <span>Click <em>Find Courses</em>, then keep only the course sections you want included.</span>
+          </li>
+          <li>
+            <strong>Generate the CSV</strong>
+            <span>Click <em>Generate Report</em>. Keep the Canvas tab open until the completion message appears.</span>
+          </li>
+          <li>
+            <strong>Open the download</strong>
+            <span>The CSV downloads automatically and contains one row per student assignment record.</span>
+          </li>
+        </ol>
+      </section>
+
+      <aside class="card content-card" aria-labelledby="know-heading">
+        <p class="section-kicker">Before you begin</p>
+        <h2 id="know-heading">Good to know</h2>
+        <div class="note-stack">
+          <div class="note highlight">
+            <strong>Canvas permissions apply</strong>
+            <p>You can only report grades and courses your Canvas account is authorized to view.</p>
+          </div>
+          <div class="note">
+            <strong>Works on your current Canvas site</strong>
+            <p>The same bookmark can run in production, beta, or test Canvas environments.</p>
+          </div>
+          <div class="note">
+            <strong>Large reports take time</strong>
+            <p>Canvas paginates grade data. The progress panel shows active courses, requests, rows, and elapsed time.</p>
+          </div>
+          <div class="note">
+            <strong>Read-only report</strong>
+            <p>The tool reads Canvas data and creates a local CSV. It does not change grades or course settings.</p>
+          </div>
+        </div>
+
+        <div class="privacy">
+          GitHub Pages hosts the JavaScript file. Canvas report data stays in your
+          browser and the CSV it creates; the tool does not upload grade data to GitHub.
+        </div>
+      </aside>
+    </div>
+
+    <section class="card troubleshooting" aria-labelledby="troubleshooting-heading">
+      <p class="section-kicker">Troubleshooting</p>
+      <h2 id="troubleshooting-heading">If something doesn’t work</h2>
+
+      <details>
+        <summary>Nothing happens when I click the bookmark</summary>
+        <p>
+          Confirm that the current tab is a Canvas page and that the bookmark’s URL
+          begins with <code>javascript:</code>. Institution-managed browser settings may
+          disable bookmarklets. If necessary, open the source link below, copy the script,
+          and run it from the browser developer console while Canvas is open.
+        </p>
+      </details>
+
+      <details>
+        <summary>No terms or courses are returned</summary>
+        <p>
+          Check your Canvas permissions, use at least three course-code characters, and
+          verify that the selected enrollment terms are correct. The course search checks
+          the configured account scope and descendant subaccounts.
+        </p>
+      </details>
+
+      <details>
+        <summary>The CSV does not download</summary>
+        <p>
+          Keep the report window open until it says <strong>Report complete</strong> and
+          allow downloads from your Canvas domain. If a run is canceled after collecting
+          rows, use <strong>Download Partial Results</strong> in the report window.
+        </p>
+      </details>
+    </section>
+  </main>
+
+  <footer>
+    <p>Canvas Assignment Grade Report</p>
+    <nav aria-label="Project links">
+      <a href="https://github.com/jasoned/build-tools/blob/main/assignment_grade_report/canvas_assignment_grade_report.js">View source on GitHub</a>
+      <a href="https://jasoned.github.io/build-tools/assignment_grade_report/canvas_assignment_grade_report.js">View published JavaScript</a>
+    </nav>
+  </footer>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    const bookmarklet = document.getElementById('bookmarklet');
+    const bookmarkletCode = document.getElementById('bookmarklet-code');
+    const copyButton = document.getElementById('copy-button');
+    const toast = document.getElementById('toast');
+    let toastTimer;
+
+    bookmarkletCode.textContent = bookmarklet.href;
+
+    function showToast(message) {
+      window.clearTimeout(toastTimer);
+      toast.textContent = message;
+      toast.classList.add('show');
+      toastTimer = window.setTimeout(() => {
+        toast.classList.remove('show');
+      }, 3200);
+    }
+
+    bookmarklet.addEventListener('click', event => {
+      event.preventDefault();
+      showToast('Drag this button to your bookmarks bar. Use Copy bookmarklet for manual setup.');
+    });
+
+    copyButton.addEventListener('click', async () => {
+      const value = bookmarklet.href;
+
+      try {
+        await navigator.clipboard.writeText(value);
+      } catch (_) {
+        const textArea = document.createElement('textarea');
+        textArea.value = value;
+        textArea.setAttribute('readonly', '');
+        textArea.style.position = 'fixed';
+        textArea.style.opacity = '0';
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand('copy');
+        textArea.remove();
+      }
+
+      copyButton.textContent = 'Copied';
+      showToast('Bookmarklet copied. Paste it into the bookmark URL field.');
+
+      window.setTimeout(() => {
+        copyButton.textContent = 'Copy bookmarklet';
+      }, 2200);
+    });
+  </script>
+</body>
+</html>
