@@ -5,7 +5,10 @@
   const APP_ID = 'canvas-assignment-grade-report-animated';
 
   const ROOT_ACCOUNT_ID = 1;
-  const COURSE_SCOPE_ACCOUNT_ID = 5;
+  const COURSE_SCOPE_ACCOUNT_IDS = [
+    3,
+    5
+  ];
   // Four parallel course streams is usually a good balance between speed and
   // Canvas's dynamic API throttling. Retries below still handle HTTP 429s.
   const TERM_CONCURRENCY = 4;
@@ -74,7 +77,14 @@
     courses: [],
     selectedCourseIds: new Set(),
 
-    scopeAccountIds: null,
+    scopeAccounts: [],
+    scopeAccountLoadError: '',
+    selectedScopeAccountIds:
+      new Set(
+        COURSE_SCOPE_ACCOUNT_IDS.map(
+          String
+        )
+      ),
 
     rows: [],
 
@@ -283,6 +293,41 @@ summary:focus {
 .count {
   color: #444;
   font-size: 13px;
+}
+
+.field-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.field-heading label {
+  margin: 0;
+}
+
+.scope-account-list {
+  display: grid;
+  grid-template-columns:
+    repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.scope-account-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid #c9d7e8;
+  border-radius: 5px;
+  background: #f5f8fc;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.scope-account-row span {
+  overflow-wrap: anywhere;
 }
 
 .term-list,
@@ -625,6 +670,10 @@ summary {
     grid-template-columns: 1fr;
   }
 
+  .scope-account-list {
+    grid-template-columns: 1fr;
+  }
+
   .activity-card {
     grid-template-columns:
       auto
@@ -661,7 +710,7 @@ summary {
 
     <main class="body">
       <section class="panel">
-        <h2>1. Choose terms</h2>
+        <h2>1. Choose scope</h2>
 
         <label for="courseCode">
           Course code contains
@@ -673,6 +722,28 @@ summary {
           placeholder="Example: COU67380"
           autocomplete="off"
         >
+
+        <div class="field-heading">
+          <label>
+            Search within subaccounts
+          </label>
+
+          <span
+            id="scopeAccountCount"
+            class="count"
+          ></span>
+        </div>
+
+        <div
+          id="scopeAccountList"
+          class="scope-account-list"
+          role="group"
+          aria-label="Course subaccounts"
+        >
+          <div class="empty">
+            Loading account names…
+          </div>
+        </div>
 
         <label for="termSearch">
           Filter terms
@@ -956,6 +1027,10 @@ summary {
 
   const elements = {
     courseCode: getElement('courseCode'),
+    scopeAccountList:
+      getElement('scopeAccountList'),
+    scopeAccountCount:
+      getElement('scopeAccountCount'),
     termSearch: getElement('termSearch'),
     termList: getElement('termList'),
     termCount: getElement('termCount'),
@@ -1272,6 +1347,14 @@ summary {
   }
 
   function updateCounts() {
+    elements.scopeAccountCount.textContent =
+      `${state.selectedScopeAccountIds.size} account` +
+      `${
+        state.selectedScopeAccountIds.size === 1
+          ? ''
+          : 's'
+      } selected`;
+
     elements.termCount.textContent =
       `${state.selectedTermIds.size} term` +
       `${
@@ -1313,6 +1396,7 @@ summary {
       elements.courseCode.value
         .trim()
         .length < 3 ||
+      state.selectedScopeAccountIds.size === 0 ||
       state.selectedTermIds.size === 0;
 
     elements.generateReport.disabled =
@@ -1804,6 +1888,104 @@ summary {
     return null;
   }
 
+  function renderScopeAccounts() {
+    elements.scopeAccountList
+      .replaceChildren();
+
+    if (!state.scopeAccounts.length) {
+      const empty =
+        document.createElement(
+          'div'
+        );
+
+      empty.className =
+        'empty';
+
+      empty.textContent =
+        state.scopeAccountLoadError ||
+        'Loading account names…';
+
+      elements.scopeAccountList
+        .appendChild(empty);
+
+      updateCounts();
+      return;
+    }
+
+    for (
+      const account
+      of state.scopeAccounts
+    ) {
+      const accountId =
+        String(account.id);
+
+      const label =
+        document.createElement(
+          'label'
+        );
+
+      label.className =
+        'scope-account-row';
+
+      const checkbox =
+        document.createElement(
+          'input'
+        );
+
+      checkbox.type =
+        'checkbox';
+
+      checkbox.checked =
+        state.selectedScopeAccountIds.has(
+          accountId
+        );
+
+      checkbox.disabled =
+        state.running;
+
+      const textSpan =
+        document.createElement(
+          'span'
+        );
+
+      textSpan.textContent =
+        `${account.name || 'Unnamed account'} ` +
+        `(ID: ${account.id})`;
+
+      checkbox.addEventListener(
+        'change',
+        () => {
+          if (checkbox.checked) {
+            state.selectedScopeAccountIds.add(
+              accountId
+            );
+          } else {
+            state.selectedScopeAccountIds.delete(
+              accountId
+            );
+          }
+
+          clearCourseResults(
+            'Subaccount selection changed. ' +
+            'Click Find Courses again.'
+          );
+
+          updateCounts();
+        }
+      );
+
+      label.append(
+        checkbox,
+        textSpan
+      );
+
+      elements.scopeAccountList
+        .appendChild(label);
+    }
+
+    updateCounts();
+  }
+
   function renderTerms() {
     elements.termList
       .replaceChildren();
@@ -2058,6 +2240,100 @@ summary {
     }
   }
 
+  async function loadScopeAccounts(
+    signal
+  ) {
+    return Promise.all(
+      COURSE_SCOPE_ACCOUNT_IDS.map(
+        async configuredAccountId => {
+          const accountUrl =
+            createApiUrl(
+              `/api/v1/accounts/${configuredAccountId}`
+            );
+
+          const descendantsUrl =
+            createApiUrl(
+              `/api/v1/accounts/${configuredAccountId}/sub_accounts`,
+              params => {
+                params.set(
+                  'recursive',
+                  'true'
+                );
+
+                params.set(
+                  'per_page',
+                  '100'
+                );
+              }
+            );
+
+          const [
+            accountResult,
+            descendants
+          ] =
+            await Promise.all([
+              fetchJson(
+                accountUrl,
+                {
+                  signal,
+
+                  label:
+                    `account ${configuredAccountId}`
+                }
+              ),
+
+              fetchAllPages(
+                descendantsUrl,
+                {
+                  signal,
+
+                  label:
+                    `subaccounts under ${configuredAccountId}`,
+
+                  onPage:
+                    ({
+                      pageNumber,
+                      totalCount
+                    }) => {
+                      setActivity(
+                        `Reading account ${configuredAccountId}`,
+                        `Received descendant page ${pageNumber}. ` +
+                        `${totalCount} subaccounts found so far.`
+                      );
+                    }
+                }
+              )
+            ]);
+
+          const account =
+            accountResult.body || {};
+
+          const resolvedId =
+            account.id ??
+            configuredAccountId;
+
+          return {
+            id:
+              resolvedId,
+
+            name:
+              account.name ||
+              `Account ${resolvedId}`,
+
+            accountIds: [
+              resolvedId,
+
+              ...descendants.map(
+                descendant =>
+                  descendant.id
+              )
+            ]
+          };
+        }
+      )
+    );
+  }
+
   async function loadTerms() {
     if (state.running) {
       return;
@@ -2073,6 +2349,8 @@ summary {
     );
 
     clearLog();
+
+    state.scopeAccountLoadError = '';
 
     setActivity(
       'Loading enrollment terms',
@@ -2102,33 +2380,66 @@ summary {
           }
         );
 
-      const returnedTerms =
-        await fetchAllPages(
-          url,
-          {
-            signal:
-              state.controller.signal,
+      const [
+        returnedTerms,
+        returnedScopeAccounts
+      ] =
+        await Promise.all([
+          fetchAllPages(
+            url,
+            {
+              signal:
+                state.controller.signal,
 
-            label:
-              'enrollment terms',
+              label:
+                'enrollment terms',
 
-            extractItems:
-              body =>
-                body?.enrollment_terms,
+              extractItems:
+                body =>
+                  body?.enrollment_terms,
 
-            onPage:
-              ({
-                pageNumber,
-                totalCount
-              }) => {
-                setActivity(
-                  'Loading enrollment terms',
-                  `Received page ${pageNumber}. ` +
-                  `${totalCount} terms received so far.`
-                );
-              }
-          }
+              onPage:
+                ({
+                  pageNumber,
+                  totalCount
+                }) => {
+                  setActivity(
+                    'Loading enrollment terms',
+                    `Received page ${pageNumber}. ` +
+                    `${totalCount} terms received so far.`
+                  );
+                }
+            }
+          ),
+
+          loadScopeAccounts(
+            state.controller.signal
+          )
+        ]);
+
+      state.scopeAccounts =
+        returnedScopeAccounts;
+
+      const validScopeAccountIds =
+        new Set(
+          state.scopeAccounts.map(
+            account =>
+              String(account.id)
+          )
         );
+
+      state.selectedScopeAccountIds =
+        new Set(
+          [...state.selectedScopeAccountIds]
+            .filter(
+              accountId =>
+                validScopeAccountIds.has(
+                  accountId
+                )
+            )
+        );
+
+      renderScopeAccounts();
 
       const now =
         Date.now();
@@ -2205,6 +2516,17 @@ summary {
         `${ROOT_ACCOUNT_ID}. ` +
         'Terms are sorted by Term ID descending.'
       );
+
+      addLog(
+        'Course-search accounts: ' +
+        state.scopeAccounts
+          .map(
+            account =>
+              `${account.name} (${account.id})`
+          )
+          .join(', ') +
+        '.'
+      );
     } catch (error) {
       if (isAbortError(error)) {
         setActivity(
@@ -2214,6 +2536,11 @@ summary {
       } else {
         state.terms = [];
 
+        state.scopeAccounts = [];
+        state.scopeAccountLoadError =
+          'Could not load course-search accounts.';
+
+        renderScopeAccounts();
         renderTerms();
 
         setActivity(
@@ -2235,63 +2562,36 @@ summary {
     }
   }
 
-  async function getScopeAccountIds(
-    signal
-  ) {
-    if (state.scopeAccountIds) {
-      return state.scopeAccountIds;
+  function getSelectedScopeAccounts() {
+    return state.scopeAccounts.filter(
+      account =>
+        state.selectedScopeAccountIds.has(
+          String(account.id)
+        )
+    );
+  }
+
+  function getSelectedScopeAccountIds() {
+    const accountIds =
+      new Set();
+
+    for (
+      const account
+      of getSelectedScopeAccounts()
+    ) {
+      for (
+        const accountId
+        of account.accountIds
+      ) {
+        accountIds.add(
+          String(accountId)
+        );
+      }
     }
 
-    const url =
-      createApiUrl(
-        `/api/v1/accounts/${COURSE_SCOPE_ACCOUNT_ID}/sub_accounts`,
-        params => {
-          params.set(
-            'recursive',
-            'true'
-          );
-
-          params.set(
-            'per_page',
-            '100'
-          );
-        }
-      );
-
-    const descendants =
-      await fetchAllPages(
-        url,
-        {
-          signal,
-
-          label:
-            'subaccounts',
-
-          onPage:
-            ({
-              pageNumber,
-              totalCount
-            }) => {
-              setActivity(
-                'Finding subaccounts',
-                `Received page ${pageNumber}. ` +
-                `${totalCount} descendant ` +
-                `subaccounts found so far.`
-              );
-            }
-        }
-      );
-
-    state.scopeAccountIds = [
-      COURSE_SCOPE_ACCOUNT_ID,
-
-      ...descendants.map(
-        account =>
-          account.id
-      )
+    return [
+      ...accountIds
     ];
-
-    return state.scopeAccountIds;
   }
 
   async function findCourses() {
@@ -2327,6 +2627,18 @@ summary {
       setActivity(
         'No terms selected',
         'Select at least one enrollment term.'
+      );
+
+      return;
+    }
+
+    const selectedScopeAccounts =
+      getSelectedScopeAccounts();
+
+    if (!selectedScopeAccounts.length) {
+      setActivity(
+        'No subaccounts selected',
+        'Select at least one course-search account.'
       );
 
       return;
@@ -2374,9 +2686,25 @@ summary {
 
     try {
       const accountIds =
-        await getScopeAccountIds(
-          state.controller.signal
+        getSelectedScopeAccountIds();
+
+      const selectedScopeNames =
+        selectedScopeAccounts.map(
+          account =>
+            account.name ||
+            `Account ${account.id}`
         );
+
+      const selectedScopeDescription =
+        selectedScopeNames.length === 1
+          ? selectedScopeNames[0]
+          : (
+              selectedScopeNames
+                .slice(0, -1)
+                .join(', ') +
+              ' and ' +
+              selectedScopeNames.at(-1)
+            );
 
       const foundCourses =
         new Map();
@@ -2396,8 +2724,8 @@ summary {
                 term.name ||
                 term.id
               }`,
-              'Canvas is checking account 5 and ' +
-              'its descendant subaccounts.'
+              `Canvas is checking ${selectedScopeDescription} ` +
+              'and their descendant subaccounts.'
             );
 
             const url =
@@ -3463,6 +3791,15 @@ summary {
     selectedCourseCount
   ) {
     const lines = [
+      `Search subaccounts: ${
+        getSelectedScopeAccounts()
+          .map(
+            account =>
+              `${account.name} (${account.id})`
+          )
+          .join(', ') ||
+        'None'
+      }`,
       `Selected terms: ${state.selectedTermIds.size}`,
       `Matched courses: ${state.courses.length}`,
       `Selected courses: ${selectedCourseCount}`,
@@ -4016,6 +4353,8 @@ summary {
 
   updateCounts();
   updateProgressDisplay();
+
+  renderScopeAccounts();
 
   elements.courseCode.focus();
 
