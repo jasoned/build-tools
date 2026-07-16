@@ -5,7 +5,7 @@
 // and save back via API. Now supports drag & drop of .docx files and
 // wrapping the current selection in a section class, plus Find/Replace.
 //
-// Version: 1.6.0 (idempotent cleanup + Find/Replace UI)
+// Version: 1.8.3 (source-aware false-bullet removal + list preservation)
 //
 // -----------------------------------------------------------------------------
 // 0) Helpers: CSRF + URL context  [UNCHANGED FROM YOUR REQUEST]
@@ -34,19 +34,35 @@ const CanvasCtx = (() => {
 })();
 
 if (window.__CanvasDocxToolsLoaded) {
-  console.log('Canvas DOCX Toolbelt already loaded.');
+  console.log(`Canvas DOCX Toolbelt already loaded (${window.__CanvasDocxToolsLoaded}). Reload the page before loading a newer version.`);
 } else {
-  window.__CanvasDocxToolsLoaded = true;
+  const TOOLBELT_VERSION = '1.8.3';
+  window.__CanvasDocxToolsLoaded = TOOLBELT_VERSION;
+  const MAMMOTH_VERSION = '1.7.2';
 
   // ---------------------------------------------------------------------------
   // 1) Inject Mammoth if missing
   function ensureMammoth() {
     return new Promise((resolve, reject) => {
-      if (window.mammoth) return resolve();
+      if (window.mammoth && window.__CanvasDocxToolsMammothVersion === MAMMOTH_VERSION) return resolve();
       const s = document.createElement('script');
-      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js';
-      s.onload = () => resolve();
+      s.src = `https://cdnjs.cloudflare.com/ajax/libs/mammoth/${MAMMOTH_VERSION}/mammoth.browser.min.js`;
+      s.onload = () => {
+        window.__CanvasDocxToolsMammothVersion = MAMMOTH_VERSION;
+        resolve();
+      };
       s.onerror = () => reject(new Error('Failed to load Mammoth.js'));
+      document.head.appendChild(s);
+    });
+  }
+
+  function ensureJSZip() {
+    return new Promise((resolve, reject) => {
+      if (window.JSZip) return resolve();
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error('Failed to load JSZip'));
       document.head.appendChild(s);
     });
   }
@@ -115,6 +131,7 @@ if (window.__CanvasDocxToolsLoaded) {
         <button class="cdt-btn secondary" type="button" id="cdt-toggle-styles">Preview Styles: On</button>
         <button class="cdt-btn secondary" type="button" id="cdt-style-legend">Styles Legend</button>
         <button class="cdt-btn success" type="button" id="cdt-save">Save to Page</button>
+        <span class="cdt-note">Toolbelt v${TOOLBELT_VERSION}</span>
         <span class="cdt-note">Page: ${CanvasCtx.courseId ?? 'unknown course'} / ${CanvasCtx.pageSlug ?? 'unknown page'}</span>
       </div>
     `;
@@ -217,7 +234,16 @@ if (window.__CanvasDocxToolsLoaded) {
       { name: 'Learning Objectives', className: 'LO' },
       { name: 'Activities and Resources', className: 'activities' },
       { name: 'Assignments', className: 'assignments' },
-    ]
+    ],
+    labelAliases: {
+      cdes: ['course description'],
+      plo: ['program learning outcome', 'program learning outcomes'],
+      clo: ['course learning outcome', 'course learning outcomes'],
+      material: ['required course material', 'required course materials'],
+      LO: ['learning objective', 'learning objectives', 'weekly learning objective', 'weekly learning objectives'],
+      activities: ['activities and resources', 'learning activities and resources'],
+      assignments: ['assignment', 'assignments']
+    }
   };
   APP_CONFIG.allowedWrapperSelectors = [
     '#wk-topics-list',
@@ -231,6 +257,484 @@ if (window.__CanvasDocxToolsLoaded) {
   window.CanvasDocxTools.config = APP_CONFIG;
 
   const textOnly = (el) => (el.textContent || '').trim().replace(/\s+/g, ' ');
+  const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  })[ch]);
+
+  function normalizeStructureText(value) {
+    return String(value ?? '')
+      .normalize('NFKC')
+      .replace(/\u00a0/g, ' ')
+      .replace(/[–—]/g, '-')
+      .replace(/&/g, ' and ')
+      .trim()
+      .toLowerCase()
+      .replace(/[.:]+$/g, '')
+      .replace(/\s+/g, ' ');
+  }
+
+  function normalizeListMatchText(value) {
+    return String(value ?? '')
+      .normalize('NFKC')
+      .replace(/[\u00ad\u200b]/g, '')
+      .replace(/\u00a0/g, ' ')
+      .replace(/[\u2018\u2019]/g, "'")
+      .replace(/[\u201c\u201d]/g, '"')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ');
+  }
+
+  function xmlDirectChildren(element, localName) {
+    return Array.from(element?.childNodes || []).filter(node =>
+      node.nodeType === 1 && (!localName || node.localName === localName)
+    );
+  }
+
+  function xmlDirectChild(element, localName) {
+    return xmlDirectChildren(element, localName)[0] || null;
+  }
+
+  function xmlDescendants(element, localName) {
+    return Array.from(element?.getElementsByTagName('*') || []).filter(node => node.localName === localName);
+  }
+
+  function xmlAttribute(element, localName) {
+    const attribute = Array.from(element?.attributes || []).find(attr => attr.localName === localName);
+    return attribute ? attribute.value : null;
+  }
+
+  function parseWordXml(xml, filename) {
+    const parsed = new DOMParser().parseFromString(xml, 'application/xml');
+    if (parsed.getElementsByTagName('parsererror').length) throw new Error(`Unable to parse ${filename}`);
+    return parsed;
+  }
+
+  function readWordIndent(properties) {
+    const indent = xmlDirectChild(properties, 'ind');
+    if (!indent) return null;
+    const start = xmlAttribute(indent, 'start') ?? xmlAttribute(indent, 'left');
+    return {
+      start: start == null || start === '' ? null : Number(start),
+      hanging: Number(xmlAttribute(indent, 'hanging')) || null
+    };
+  }
+
+  function readWordNumberingProperties(properties) {
+    const numPr = xmlDirectChild(properties, 'numPr');
+    if (!numPr) return null;
+    return {
+      numId: xmlAttribute(xmlDirectChild(numPr, 'numId'), 'val'),
+      level: xmlAttribute(xmlDirectChild(numPr, 'ilvl'), 'val')
+    };
+  }
+
+  function readWordNumberingLevel(levelElement) {
+    if (!levelElement) return {};
+    const properties = xmlDirectChild(levelElement, 'pPr');
+    const startValue = xmlAttribute(xmlDirectChild(levelElement, 'start'), 'val');
+    return {
+      format: xmlAttribute(xmlDirectChild(levelElement, 'numFmt'), 'val'),
+      levelText: xmlAttribute(xmlDirectChild(levelElement, 'lvlText'), 'val'),
+      start: startValue == null ? null : Number(startValue),
+      indent: readWordIndent(properties)
+    };
+  }
+
+  function parseWordNumbering(numberingXml) {
+    const abstractNums = new Map();
+    xmlDescendants(numberingXml, 'abstractNum').forEach(abstractElement => {
+      const levels = new Map();
+      xmlDirectChildren(abstractElement, 'lvl').forEach(levelElement => {
+        levels.set(xmlAttribute(levelElement, 'ilvl') || '0', readWordNumberingLevel(levelElement));
+      });
+      abstractNums.set(xmlAttribute(abstractElement, 'abstractNumId'), levels);
+    });
+
+    const nums = new Map();
+    xmlDescendants(numberingXml, 'num').forEach(numElement => {
+      const overrides = new Map();
+      xmlDirectChildren(numElement, 'lvlOverride').forEach(overrideElement => {
+        const level = xmlAttribute(overrideElement, 'ilvl') || '0';
+        const override = readWordNumberingLevel(xmlDirectChild(overrideElement, 'lvl'));
+        const startOverride = xmlAttribute(xmlDirectChild(overrideElement, 'startOverride'), 'val');
+        if (startOverride != null) override.start = Number(startOverride);
+        overrides.set(level, override);
+      });
+      nums.set(xmlAttribute(numElement, 'numId'), {
+        abstractNumId: xmlAttribute(xmlDirectChild(numElement, 'abstractNumId'), 'val'),
+        overrides
+      });
+    });
+
+    return (numId, level) => {
+      const num = nums.get(String(numId));
+      if (!num) return {};
+      const base = abstractNums.get(num.abstractNumId)?.get(String(level)) || {};
+      const override = num.overrides.get(String(level)) || {};
+      const merged = { ...base };
+      Object.entries(override).forEach(([key, value]) => {
+        if (value != null) merged[key] = value;
+      });
+      return merged;
+    };
+  }
+
+  function parseWordParagraphStyles(stylesXml) {
+    if (!stylesXml) return () => ({});
+    const styles = new Map();
+    xmlDescendants(stylesXml, 'style').forEach(styleElement => {
+      if (xmlAttribute(styleElement, 'type') !== 'paragraph') return;
+      const properties = xmlDirectChild(styleElement, 'pPr');
+      styles.set(xmlAttribute(styleElement, 'styleId'), {
+        basedOn: xmlAttribute(xmlDirectChild(styleElement, 'basedOn'), 'val'),
+        numbering: readWordNumberingProperties(properties),
+        indent: readWordIndent(properties)
+      });
+    });
+    const resolved = new Map();
+    const resolve = (styleId, trail = new Set()) => {
+      if (!styleId || trail.has(styleId)) return {};
+      if (resolved.has(styleId)) return resolved.get(styleId);
+      const style = styles.get(styleId);
+      if (!style) return {};
+      const nextTrail = new Set(trail); nextTrail.add(styleId);
+      const base = resolve(style.basedOn, nextTrail);
+      const value = {
+        numbering: style.numbering || base.numbering || null,
+        indent: style.indent || base.indent || null
+      };
+      resolved.set(styleId, value);
+      return value;
+    };
+    return resolve;
+  }
+
+  async function extractDocxListMetadata(arrayBuffer) {
+    await ensureJSZip();
+    const zip = await window.JSZip.loadAsync(arrayBuffer);
+    const documentEntry = zip.file('word/document.xml');
+    const numberingEntry = zip.file('word/numbering.xml');
+    if (!documentEntry || !numberingEntry) return [];
+    const [documentText, numberingText, stylesText] = await Promise.all([
+      documentEntry.async('string'),
+      numberingEntry.async('string'),
+      zip.file('word/styles.xml')?.async('string') || Promise.resolve(null)
+    ]);
+    const documentXml = parseWordXml(documentText, 'word/document.xml');
+    const numberingXml = parseWordXml(numberingText, 'word/numbering.xml');
+    const stylesXml = stylesText ? parseWordXml(stylesText, 'word/styles.xml') : null;
+    const findNumberingLevel = parseWordNumbering(numberingXml);
+    const findParagraphStyle = parseWordParagraphStyles(stylesXml);
+    const result = [];
+
+    xmlDescendants(documentXml, 'p').forEach((paragraph, sequence) => {
+      const properties = xmlDirectChild(paragraph, 'pPr');
+      const styleId = xmlAttribute(xmlDirectChild(properties, 'pStyle'), 'val');
+      const style = findParagraphStyle(styleId);
+      const directNumbering = readWordNumberingProperties(properties);
+      const text = xmlDescendants(paragraph, 't').map(node => node.textContent || '').join('');
+      const matchText = normalizeListMatchText(text);
+      if (!matchText) return;
+      if (directNumbering?.numId === '0') {
+        result.push({ sequence, text, matchText, isList: false });
+        return;
+      }
+      const numbering = directNumbering || style.numbering;
+      const numId = numbering?.numId;
+      if (numId == null) {
+        // Keep a neutral placeholder so repeated paragraph text remains aligned
+        // with the corresponding HTML nodes. Without it, an ordinary paragraph
+        // can consume the later explicit numId=0 marker for a false list item.
+        result.push({ sequence, text, matchText, isList: null });
+        return;
+      }
+      const level = numbering.level ?? style.numbering?.level ?? '0';
+      const definition = findNumberingLevel(numId, level);
+      const directIndent = readWordIndent(properties);
+      const left = directIndent?.start ?? definition.indent?.start ?? style.indent?.start ?? null;
+      result.push({
+        sequence,
+        text,
+        matchText,
+        isList: true,
+        numId: String(numId),
+        level: Number(level) || 0,
+        format: definition.format || 'decimal',
+        levelText: definition.levelText || null,
+        start: Number.isFinite(definition.start) ? definition.start : null,
+        left: Number.isFinite(left) ? left : null
+      });
+    });
+    return result;
+  }
+
+  function listItemOwnText(item) {
+    const clone = item.cloneNode(true);
+    clone.querySelectorAll('ol, ul').forEach(list => list.remove());
+    return textOnly(clone);
+  }
+
+  function listIndent(metadata) {
+    return Number.isFinite(metadata?.left) ? metadata.left : (Number(metadata?.level) || 0) * 720;
+  }
+
+  function listFormatKey(metadata) {
+    return metadata?.format || 'decimal';
+  }
+
+  function applyWordListFormat(list, metadata) {
+    if (!list || !metadata) return;
+    const htmlTypes = { lowerLetter: 'a', upperLetter: 'A', lowerRoman: 'i', upperRoman: 'I' };
+    const cssTypes = {
+      lowerLetter: 'lower-alpha', upperLetter: 'upper-alpha',
+      lowerRoman: 'lower-roman', upperRoman: 'upper-roman',
+      lowerGreek: 'lower-greek', decimal: 'decimal', bullet: 'disc'
+    };
+    if (list.tagName === 'OL') {
+      const type = htmlTypes[metadata.format];
+      if (type) list.setAttribute('type', type); else list.removeAttribute('type');
+      const cssType = cssTypes[metadata.format];
+      if (cssType && !type) list.style.listStyleType = cssType;
+      else list.style.removeProperty('list-style-type');
+      if (Number.isFinite(metadata.start) && metadata.start > 1) list.setAttribute('start', String(metadata.start));
+      else list.removeAttribute('start');
+    }
+  }
+
+  function createWordList(doc, metadata) {
+    const list = doc.createElement(metadata?.format === 'bullet' ? 'ul' : 'ol');
+    applyWordListFormat(list, metadata);
+    return list;
+  }
+
+  function appendListItemContentAsBlocks(item, target) {
+    const doc = item.ownerDocument;
+    const blockTags = new Set(['P', 'DIV', 'SECTION', 'ARTICLE', 'UL', 'OL', 'TABLE']);
+    let paragraph = null;
+    const flushParagraph = () => {
+      if (paragraph && (paragraph.textContent.trim() || paragraph.children.length)) target.appendChild(paragraph);
+      paragraph = null;
+    };
+    const ensureParagraph = () => (paragraph ||= doc.createElement('p'));
+    while (item.firstChild) {
+      const child = item.firstChild;
+      item.removeChild(child);
+      if (child.nodeType === Node.ELEMENT_NODE && blockTags.has(child.tagName)) {
+        flushParagraph();
+        target.appendChild(child);
+      } else if (child.nodeType === Node.TEXT_NODE && !child.textContent.trim() && !paragraph) {
+        continue;
+      } else {
+        ensureParagraph().appendChild(child);
+      }
+    }
+    flushParagraph();
+  }
+
+  function repairFalseWordListItems(doc, metadataByItem, syntheticItems) {
+    Array.from(doc.querySelectorAll('ol, ul')).reverse().forEach(list => {
+      const items = Array.from(list.children).filter(child => child.tagName === 'LI');
+      const shouldUnwrap = item => metadataByItem.get(item)?.isList === false || syntheticItems.has(item);
+      if (!items.some(shouldUnwrap)) return;
+
+      const replacement = doc.createDocumentFragment();
+      let listChunk = null;
+      const flushList = () => {
+        if (listChunk?.children.length) replacement.appendChild(listChunk);
+        listChunk = null;
+      };
+      const ensureList = () => {
+        if (listChunk) return listChunk;
+        listChunk = doc.createElement(list.tagName.toLowerCase());
+        Array.from(list.attributes).forEach(attribute => listChunk.setAttribute(attribute.name, attribute.value));
+        return listChunk;
+      };
+
+      items.forEach(item => {
+        if (!shouldUnwrap(item)) {
+          ensureList().appendChild(item);
+          return;
+        }
+        flushList();
+        appendListItemContentAsBlocks(item, replacement);
+        item.remove();
+      });
+      flushList();
+      list.replaceWith(replacement);
+    });
+  }
+
+  function mergeAdjacentWordLists(doc) {
+    Array.from(doc.querySelectorAll('ol, ul')).forEach(list => {
+      let next = list.nextElementSibling;
+      while (next && next.tagName === list.tagName) {
+        const currentType = list.getAttribute('type') || '';
+        const nextType = next.getAttribute('type') || '';
+        const currentStyle = list.getAttribute('style') || '';
+        const nextStyle = next.getAttribute('style') || '';
+        if (currentType !== nextType || currentStyle !== nextStyle) break;
+        while (next.firstChild) list.appendChild(next.firstChild);
+        const consumed = next;
+        next = next.nextElementSibling;
+        consumed.remove();
+      }
+    });
+  }
+
+  function repairWordList(list, metadataByItem) {
+    const items = Array.from(list.children).filter(child => child.tagName === 'LI');
+    const firstIndex = items.findIndex(item => metadataByItem.get(item)?.isList !== false && metadataByItem.has(item));
+    if (firstIndex < 0) return;
+    const firstItem = items[firstIndex];
+    const firstMetadata = metadataByItem.get(firstItem);
+    applyWordListFormat(list, firstMetadata);
+    const stack = [{
+      indent: listIndent(firstMetadata),
+      list,
+      format: listFormatKey(firstMetadata),
+      numId: firstMetadata.numId,
+      lastLi: null
+    }];
+
+    items.forEach(item => {
+      const metadata = metadataByItem.get(item);
+      if (!metadata || metadata.isList === false) {
+        stack[stack.length - 1].lastLi = item;
+        return;
+      }
+      const indent = listIndent(metadata);
+      while (stack.length > 1 && indent < stack[stack.length - 1].indent) stack.pop();
+      let frame = stack[stack.length - 1];
+
+      if (indent > frame.indent && frame.lastLi) {
+        const nestedList = createWordList(list.ownerDocument, metadata);
+        frame.lastLi.appendChild(nestedList);
+        frame = { indent, list: nestedList, format: listFormatKey(metadata), numId: metadata.numId, lastLi: null };
+        stack.push(frame);
+      } else if (indent === frame.indent && frame.lastLi &&
+        (listFormatKey(metadata) !== frame.format || metadata.numId !== frame.numId)) {
+        const siblingList = createWordList(list.ownerDocument, metadata);
+        frame.list.insertAdjacentElement('afterend', siblingList);
+        frame.list = siblingList;
+        frame.format = listFormatKey(metadata);
+        frame.numId = metadata.numId;
+        frame.lastLi = null;
+      }
+
+      frame.list.appendChild(item);
+      frame.lastLi = item;
+    });
+  }
+
+  function restoreWordListStructure(rawHtml, listMetadata) {
+    if (!Array.isArray(listMetadata) || !listMetadata.length) return rawHtml;
+    const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
+    const queues = new Map();
+    listMetadata.forEach(metadata => {
+      const queue = queues.get(metadata.matchText) || [];
+      queue.push(metadata); queues.set(metadata.matchText, queue);
+    });
+    const metadataByItem = new Map();
+    const syntheticItems = new Set();
+    doc.querySelectorAll('p, li').forEach(item => {
+      const ownText = item.tagName === 'LI' ? listItemOwnText(item) : textOnly(item);
+      if (item.tagName === 'LI' && !ownText && item.querySelector(':scope > ol, :scope > ul')) syntheticItems.add(item);
+      const queue = queues.get(normalizeListMatchText(ownText));
+      if (queue?.length) {
+        const metadata = queue.shift();
+        if (metadata.isList !== null) metadataByItem.set(item, metadata);
+      }
+    });
+    repairFalseWordListItems(doc, metadataByItem, syntheticItems);
+    mergeAdjacentWordLists(doc);
+    Array.from(doc.querySelectorAll('ol, ul')).forEach(list => repairWordList(list, metadataByItem));
+    return doc.body.innerHTML;
+  }
+
+  function parseWeekHeading(value) {
+    const text = String(value ?? '').replace(/\u00a0/g, ' ').trim();
+    const match = text.match(/^week\s*(\d+)\s*(?::|[-–—])?\s*(.+)$/i);
+    if (!match) return null;
+    return { number: Number(match[1]), title: match[2].trim() };
+  }
+
+  function aliasClassForText(value, sectionDefs) {
+    let normalized = normalizeStructureText(value);
+    normalized = normalized.replace(/\s*\([^)]*\)\s*$/, '').trim();
+    for (const section of sectionDefs) {
+      const aliases = APP_CONFIG.labelAliases[section.className] || [];
+      if (aliases.includes(normalized)) return section.className;
+    }
+    return null;
+  }
+
+  function addElementFix(el, message) {
+    if (!el || !message) return;
+    let fixes = [];
+    try { fixes = JSON.parse(el.getAttribute('data-cdt-fixes') || '[]'); } catch (_) {}
+    if (!fixes.includes(message)) fixes.push(message);
+    el.setAttribute('data-cdt-fixes', JSON.stringify(fixes));
+  }
+
+  function getElementFixes(rootEl) {
+    const fixes = [];
+    if (!rootEl) return fixes;
+    const candidates = [rootEl, ...rootEl.querySelectorAll('[data-cdt-fixes]')];
+    candidates.forEach(el => {
+      try {
+        const parsed = JSON.parse(el.getAttribute('data-cdt-fixes') || '[]');
+        parsed.forEach(fix => { if (fix && !fixes.includes(fix)) fixes.push(fix); });
+      } catch (_) {}
+    });
+    return fixes;
+  }
+
+  function retagElement(doc, el, tagName) {
+    if (el.tagName.toLowerCase() === tagName.toLowerCase()) return el;
+    const replacement = doc.createElement(tagName);
+    Array.from(el.attributes).forEach(attr => replacement.setAttribute(attr.name, attr.value));
+    while (el.firstChild) replacement.appendChild(el.firstChild);
+    el.replaceWith(replacement);
+    return replacement;
+  }
+
+  function canonicalizeStructureLabels(doc) {
+    let currentWeek = null;
+    Array.from(doc.body.children).forEach(original => {
+      if (!original.matches('p, h1, h2, h3, h4, h5, h6')) return;
+      const originalText = textOnly(original);
+      const week = parseWeekHeading(originalText);
+      if (week) {
+        let heading = retagElement(doc, original, 'h1');
+        const canonicalText = `Week ${week.number}: ${week.title}`;
+        const neededFix = !original.matches('h1.wk-topic') || originalText !== canonicalText;
+        heading.classList.add('wk-topic');
+        heading.setAttribute('data-cdt-week-number', String(week.number));
+        heading.setAttribute('data-cdt-week-title', week.title);
+        if (heading.textContent.trim() !== canonicalText) heading.textContent = canonicalText;
+        if (neededFix) addElementFix(heading, `Week ${week.number}: heading recognized from text instead of the expected Word style.`);
+        currentWeek = week.number;
+        return;
+      }
+
+      const defs = currentWeek ? APP_CONFIG.weeklySections : APP_CONFIG.topLevelSections;
+      const className = aliasClassForText(originalText, defs);
+      if (!className) return;
+      const section = defs.find(item => item.className === className);
+      let heading = retagElement(doc, original, 'h1');
+      heading.setAttribute('data-cdt-section-label', className);
+      const canonicalText = section.name;
+      const labelChanged = normalizeStructureText(originalText) !== normalizeStructureText(canonicalText);
+      const tagChanged = original.tagName !== 'H1';
+      if (heading.textContent.trim() !== canonicalText) heading.textContent = canonicalText;
+      if (currentWeek && (labelChanged || tagChanged)) {
+        addElementFix(heading, `Week ${currentWeek}: recognized “${originalText}” as “${canonicalText}”.`);
+      } else if (!currentWeek && (labelChanged || tagChanged)) {
+        addElementFix(heading, `Recognized “${originalText}” as the ${canonicalText} heading.`);
+      }
+    });
+  }
 
   function stashNestedTables(doc) {
     const store = new Map(); let counter = 0;
@@ -252,13 +756,19 @@ if (window.__CanvasDocxToolsLoaded) {
     });
   }
   function moveChildrenPreservingBlocks(src, dst) {
+    const ownerDoc = dst.ownerDocument || src.ownerDocument || document;
     let currentP = null;
     const flushP = () => { if (currentP && currentP.childNodes.length) dst.appendChild(currentP); currentP = null; };
-    const ensureP = () => (currentP ||= document.createElement('p'));
+    const ensureP = () => (currentP ||= ownerDoc.createElement('p'));
     function walk(node) {
       while (node.firstChild) {
         const child = node.firstChild; node.removeChild(child);
-        if (child.nodeType === Node.TEXT_NODE) { if (child.textContent.trim()) ensureP().appendChild(document.createTextNode(child.textContent)); continue; }
+        if (child.nodeType === Node.TEXT_NODE) {
+          const value = child.textContent || '';
+          if (value.trim()) ensureP().appendChild(ownerDoc.createTextNode(value));
+          else if (currentP?.childNodes.length && node.firstChild) currentP.appendChild(ownerDoc.createTextNode(' '));
+          continue;
+        }
         if (child.nodeType !== Node.ELEMENT_NODE) continue;
         if (child.matches('span[data-table-ph]')) { flushP(); dst.appendChild(child); continue; }
         if (child.tagName === 'UL' || child.tagName === 'OL') { flushP(); dst.appendChild(child); continue; }
@@ -270,42 +780,56 @@ if (window.__CanvasDocxToolsLoaded) {
     walk(src); flushP();
   }
 
+  function mergeAdjacentInlineFormatting(root) {
+    const mergeableTags = new Set(['STRONG', 'B', 'EM', 'I', 'U']);
+    const sameAttributes = (left, right) => {
+      if (left.attributes.length !== right.attributes.length) return false;
+      return Array.from(left.attributes).every(attribute => right.getAttribute(attribute.name) === attribute.value);
+    };
+    const missingDeadlineSpace = (leftText, rightText) =>
+      (/\bof$/i.test(leftText) && /^Week\b/i.test(rightText)) ||
+      (/\bWeek$/i.test(leftText) && /^\d+\b/.test(rightText));
+
+    root.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, td, th').forEach(container => {
+      let current = container.firstChild;
+      while (current) {
+        if (current.nodeType !== Node.ELEMENT_NODE || !mergeableTags.has(current.tagName)) {
+          current = current.nextSibling;
+          continue;
+        }
+
+        const separator = current.nextSibling;
+        const hasWhitespaceSeparator = separator?.nodeType === Node.TEXT_NODE && !separator.textContent.trim();
+        const candidate = hasWhitespaceSeparator ? separator.nextSibling : separator;
+        if (candidate?.nodeType !== Node.ELEMENT_NODE || candidate.tagName !== current.tagName || !sameAttributes(current, candidate)) {
+          current = current.nextSibling;
+          continue;
+        }
+
+        const needsSpace = hasWhitespaceSeparator || missingDeadlineSpace(current.textContent, candidate.textContent);
+        if (hasWhitespaceSeparator) separator.remove();
+        if (needsSpace && !/\s$/.test(current.textContent || '') && !/^\s/.test(candidate.textContent || '')) {
+          current.appendChild(current.ownerDocument.createTextNode(' '));
+        }
+        while (candidate.firstChild) current.appendChild(candidate.firstChild);
+        candidate.remove();
+      }
+    });
+  }
+
   function headingMatches(h, target) {
     const t = h.textContent.trim().toLowerCase().replace(/[:]+$/,'');
     const k = target.trim().toLowerCase();
     return t === k;
   }
 
-  function processContentTables(doc, sectionHeadingText, wrapperClass, endWithHr = false) {
-    const sectionHeadings = Array.from(doc.querySelectorAll('h1')).filter(h => headingMatches(h, sectionHeadingText));
-    sectionHeadings.forEach(heading => {
-      const mainWrapper = document.createElement('div'); mainWrapper.className = wrapperClass;
-      const tablesToProcess = [];
-      let currentNode = heading.nextElementSibling;
-      while (currentNode && currentNode.tagName !== 'H1') { if (currentNode.tagName === 'TABLE') tablesToProcess.push(currentNode); currentNode = currentNode.nextElementSibling; }
-      tablesToProcess.forEach((table, index) => {
-        const itemDiv = document.createElement('div');
-        const rows = Array.from(table.querySelectorAll('tr'));
-        if (rows.length > 0) {
-          const titleCell = rows[0].querySelector('td, th');
-          if (titleCell && titleCell.textContent.trim()) { const h2 = document.createElement('h2'); h2.textContent = textOnly(titleCell); itemDiv.appendChild(h2); }
-          for (let i = 1; i < rows.length; i++) {
-            const contentCell = rows[i].querySelector('td, th');
-            if (contentCell) moveChildrenPreservingBlocks(contentCell, itemDiv);
-          }
-        }
-        if (itemDiv.hasChildNodes()) mainWrapper.appendChild(itemDiv);
-        const isLast = index === tablesToProcess.length - 1;
-        if (endWithHr || !isLast) mainWrapper.appendChild(document.createElement('hr'));
-      });
-      if (mainWrapper.hasChildNodes()) { heading.insertAdjacentElement('afterend', mainWrapper); tablesToProcess.forEach(t => t.remove()); }
-    });
-  }
-
   function wrapSectionContent(doc, headingText, wrapperClass) {
-    const heading = Array.from(doc.querySelectorAll('h1')).find(h => headingMatches(h, headingText));
+    const heading = Array.from(doc.body.children).find(el => el.matches(`h1[data-cdt-section-label="${wrapperClass}"]`) || (el.tagName === 'H1' && headingMatches(el, headingText)));
     if (!heading) return;
-    const wrapper = document.createElement('div'); wrapper.className = wrapperClass;
+    const existing = heading.nextElementSibling;
+    if (existing && existing.classList.contains(wrapperClass)) return;
+    const wrapper = doc.createElement('div'); wrapper.className = wrapperClass;
+    wrapper.setAttribute('data-cdt-section', wrapperClass);
     let currentNode = heading.nextElementSibling; const move = [];
     while (currentNode && currentNode.tagName !== 'H1') { move.push(currentNode); currentNode = currentNode.nextElementSibling; }
     move.forEach(el => wrapper.appendChild(el));
@@ -313,8 +837,187 @@ if (window.__CanvasDocxToolsLoaded) {
   }
 
   function cleanupHtml(doc) {
+    mergeAdjacentInlineFormatting(doc);
     doc.querySelectorAll('p, a').forEach(el => { if (!el.textContent.trim() && !el.children.length) el.remove(); });
     return doc;
+  }
+
+  function getWeeklySegments(doc) {
+    const headings = Array.from(doc.body.children).filter(el => el.matches('h1.wk-topic'));
+    return headings.map(heading => {
+      const nodes = [];
+      let cur = heading.nextElementSibling;
+      while (cur && !cur.matches('h1.wk-topic')) { nodes.push(cur); cur = cur.nextElementSibling; }
+      const parsed = parseWeekHeading(heading.textContent) || {};
+      return {
+        heading,
+        number: parsed.number || Number(heading.getAttribute('data-cdt-week-number')),
+        title: parsed.title || heading.getAttribute('data-cdt-week-title') || textOnly(heading),
+        nodes
+      };
+    });
+  }
+
+  function appendTableAsSectionItem(doc, table, wrapper, addTrailingRule) {
+    const itemDiv = doc.createElement('div');
+    const rows = Array.from(table.querySelectorAll(':scope > tbody > tr, :scope > thead > tr, :scope > tr'));
+    if (rows.length > 0) {
+      const titleCell = rows[0].querySelector(':scope > td, :scope > th');
+      if (titleCell && titleCell.textContent.trim()) {
+        const h2 = doc.createElement('h2'); h2.textContent = textOnly(titleCell); itemDiv.appendChild(h2);
+      }
+      for (let i = 1; i < rows.length; i++) {
+        const contentCell = rows[i].querySelector(':scope > td, :scope > th');
+        if (contentCell) moveChildrenPreservingBlocks(contentCell, itemDiv);
+      }
+    }
+    if (itemDiv.hasChildNodes()) wrapper.appendChild(itemDiv);
+    if (addTrailingRule && itemDiv.hasChildNodes()) wrapper.appendChild(doc.createElement('hr'));
+    table.remove();
+  }
+
+  function collectObjectiveTexts(root, addObjective) {
+    const listItems = [
+      ...(root.matches && root.matches('li') ? [root] : []),
+      ...Array.from(root.querySelectorAll ? root.querySelectorAll('li') : [])
+    ].filter(li => !li.querySelector('li') && textOnly(li));
+    if (listItems.length) {
+      listItems.forEach(li => addObjective(textOnly(li)));
+      return { count: listItems.length, usedPlainParagraph: false };
+    }
+
+    const paragraphs = [
+      ...(root.matches && root.matches('p') ? [root] : []),
+      ...Array.from(root.querySelectorAll ? root.querySelectorAll('p') : [])
+    ].filter(p => textOnly(p));
+    if (paragraphs.length) {
+      paragraphs.forEach(p => addObjective(textOnly(p)));
+      return { count: paragraphs.length, usedPlainParagraph: true };
+    }
+
+    const value = textOnly(root);
+    if (value) {
+      addObjective(value);
+      return { count: 1, usedPlainParagraph: true };
+    }
+    return { count: 0, usedPlainParagraph: false };
+  }
+
+  function appendLearningObjectiveContent(doc, nodes, wrapper, weekNumber) {
+    const seen = new Set();
+    const objectives = [];
+    const preserved = [];
+    let usedPlainParagraph = false;
+    const addObjective = value => {
+      const clean = String(value || '').trim().replace(/\s+/g, ' ');
+      const key = normalizeStructureText(clean);
+      if (!key || seen.has(key)) return false;
+      seen.add(key); objectives.push(clean); return true;
+    };
+    const collect = (root, trackPlainParagraph = true) => {
+      const before = objectives.length;
+      const result = collectObjectiveTexts(root, addObjective);
+      if (trackPlainParagraph && result.usedPlainParagraph && objectives.length > before) usedPlainParagraph = true;
+      return objectives.length - before;
+    };
+
+    // Rebuild existing LO wrappers too. This removes list+paragraph duplicates
+    // left by earlier versions when the tool is run again on current HTML.
+    collect(wrapper, false);
+    wrapper.replaceChildren();
+
+    nodes.forEach(node => {
+      if (node.matches && node.matches('.LO')) {
+        collect(node, false);
+        node.remove();
+        return;
+      }
+      if (node.tagName === 'TABLE') {
+        const before = objectives.length;
+        const rows = Array.from(node.querySelectorAll(':scope > tbody > tr, :scope > thead > tr, :scope > tr'));
+        rows.forEach(row => {
+          const firstCell = row.querySelector(':scope > td, :scope > th');
+          if (firstCell) collect(firstCell);
+        });
+        if (objectives.length > before) node.remove();
+        else preserved.push(node);
+        return;
+      }
+      const before = objectives.length;
+      collect(node);
+      if (objectives.length > before) node.remove();
+      else preserved.push(node);
+    });
+
+    objectives.forEach(value => {
+      const p = doc.createElement('p'); p.textContent = value; wrapper.appendChild(p);
+    });
+    preserved.forEach(node => wrapper.appendChild(node));
+
+    if (usedPlainParagraph) addElementFix(wrapper, `Week ${weekNumber}: learning objectives extracted from ordinary paragraphs rather than Word list formatting.`);
+    if (objectives.length === 0 && wrapper.querySelector('table')) {
+      wrapper.setAttribute('data-cdt-needs-review', 'true');
+      addElementFix(wrapper, `Week ${weekNumber}: the learning-objective table was preserved because its content could not be simplified safely.`);
+    } else {
+      wrapper.removeAttribute('data-cdt-needs-review');
+    }
+  }
+
+  function appendStandardSectionContent(doc, nodes, wrapper, className) {
+    const tables = nodes.filter(node => node.tagName === 'TABLE');
+    let tableIndex = 0;
+    nodes.forEach(node => {
+      if (node.matches && node.matches(`.${className}`)) {
+        while (node.firstChild) wrapper.appendChild(node.firstChild);
+        node.remove();
+        return;
+      }
+      if (node.tagName !== 'TABLE') {
+        wrapper.appendChild(node);
+        return;
+      }
+      const isLast = tableIndex === tables.length - 1;
+      appendTableAsSectionItem(doc, node, wrapper, className === 'assignments' || !isLast);
+      tableIndex++;
+    });
+  }
+
+  function processWeeklySections(doc) {
+    getWeeklySegments(doc).forEach(segment => {
+      const occurrences = [];
+      let current = null;
+      segment.nodes.forEach(node => {
+        const className = node.getAttribute && node.getAttribute('data-cdt-section-label');
+        if (className && APP_CONFIG.weeklySections.some(section => section.className === className)) {
+          current = { className, heading: node, nodes: [] };
+          occurrences.push(current);
+        } else if (current) {
+          current.nodes.push(node);
+        }
+      });
+
+      APP_CONFIG.weeklySections.forEach(section => {
+        const matches = occurrences.filter(item => item.className === section.className);
+        if (!matches.length) return;
+        const first = matches[0];
+        const existing = first.nodes.find(node => node.matches && node.matches(`.${section.className}`));
+        const wrapper = existing || doc.createElement('div');
+        wrapper.classList.add(section.className);
+        wrapper.setAttribute('data-cdt-section', section.className);
+        if (!existing) first.heading.insertAdjacentElement('afterend', wrapper);
+
+        const allNodes = [];
+        matches.forEach(match => {
+          match.nodes.forEach(node => { if (node !== wrapper) allNodes.push(node); });
+          if (match !== first) match.heading.remove();
+          getElementFixes(match.heading).forEach(fix => addElementFix(wrapper, fix));
+        });
+        if (matches.length > 1) addElementFix(wrapper, `Week ${segment.number}: merged ${matches.length} “${section.name}” labels into one section.`);
+
+        if (section.className === 'LO') appendLearningObjectiveContent(doc, allNodes, wrapper, segment.number);
+        else appendStandardSectionContent(doc, allNodes, wrapper, section.className);
+      });
+    });
   }
 
   function createWeeklyTopicsList(doc) {
@@ -325,10 +1028,10 @@ if (window.__CanvasDocxToolsLoaded) {
     if (old) old.remove();
 
     const listContainer = doc.createElement('div'); listContainer.id = 'wk-topics-list';
-    const title = document.createElement('h2'); title.textContent = 'Weekly Topics'; listContainer.appendChild(title);
-    const ul = document.createElement('ul');
+    const title = doc.createElement('h2'); title.textContent = 'Weekly Topics'; listContainer.appendChild(title);
+    const ul = doc.createElement('ul');
     topicHeaders.forEach(h1 => {
-      const li = document.createElement('li');
+      const li = doc.createElement('li');
       li.textContent = h1.textContent.trim().replace(/^Week\s+\d+:\s*/i, '');
       ul.appendChild(li);
     });
@@ -339,25 +1042,11 @@ if (window.__CanvasDocxToolsLoaded) {
     const parser = new DOMParser(); let doc = parser.parseFromString(rawHtml, 'text/html');
     const tableStore = stashNestedTables(doc);
 
+    doc = cleanupHtml(doc);
+    canonicalizeStructureLabels(doc);
+
     APP_CONFIG.topLevelSections.forEach(section => wrapSectionContent(doc, section.name, section.className));
-
-    doc.querySelectorAll('h1.wk-topic').forEach(topic => {
-      const nextH1 = topic.nextElementSibling;
-      if (nextH1 && nextH1.tagName === 'H1' && headingMatches(nextH1, 'Learning Objectives')) {
-        const table = nextH1.nextElementSibling;
-        if (table && table.tagName === 'TABLE') {
-          const wrapper = document.createElement('div'); wrapper.className = 'LO';
-          const seen = new Set();
-          Array.from(table.querySelectorAll('li')).forEach(li => {
-            const t = li.textContent.trim(); if (t && !seen.has(t)) { const p = document.createElement('p'); p.textContent = t; wrapper.appendChild(p); seen.add(t); }
-          });
-          if (wrapper.hasChildNodes()) { nextH1.insertAdjacentElement('afterend', wrapper); table.remove(); }
-        }
-      }
-    });
-
-    processContentTables(doc, 'Activities and Resources', 'activities', false);
-    processContentTables(doc, 'Assignments', 'assignments', true);
+    processWeeklySections(doc);
 
     restorePlaceholders(doc, tableStore);
     doc = cleanupHtml(doc);
@@ -371,110 +1060,224 @@ if (window.__CanvasDocxToolsLoaded) {
     return doc.body.innerHTML;
   }
 
-  function generateSectionPresenceReport(htmlContent) {
+  function analyzeDocumentStructure(htmlContent) {
     const parser = new DOMParser(); const doc = parser.parseFromString(htmlContent, 'text/html');
-    let issuesFound = false; const recommendations = []; const topLevelErrors = [];
-    APP_CONFIG.topLevelSections.forEach(section => {
-      if (doc.querySelectorAll(`.${section.className}`).length === 0) {
-        issuesFound = true; const msg = `Top-Level section "${section.name}" is missing.`; topLevelErrors.push(msg); recommendations.push(msg);
-      }
+    const recommendations = [];
+    const topLevel = APP_CONFIG.topLevelSections.map(section => {
+      const count = doc.querySelectorAll(`.${section.className}`).length;
+      if (count === 0) recommendations.push(`Top-level section “${section.name}” is missing.`);
+      if (count > 1) recommendations.push(`Top-level section “${section.name}” appears ${count} times.`);
+      return { ...section, count };
     });
-    const wkTopicHeaders = doc.querySelectorAll('h1.wk-topic');
-    const weeklyReportData = []; let anyUnwrapped = false;
-    if (wkTopicHeaders.length === 0) { issuesFound = true; recommendations.push("No 'Weekly Topic' sections (h1.wk-topic) were found."); }
-    wkTopicHeaders.forEach((wkTopic, index) => {
-      const weekNumber = index + 1;
-      const cleanText = wkTopic.textContent.trim().replace(/^Week\s+\d+:\s*/i, '');
-      let els = []; let cur = wkTopic.nextElementSibling;
-      while (cur && !cur.matches('h1.wk-topic')) { els.push(cur); cur = cur.nextElementSibling; }
-      const frag = document.createElement('div'); els.forEach(el => frag.appendChild(el.cloneNode(true)));
+    const weeks = getWeeklySegments(doc).map(segment => {
+      const frag = doc.createElement('div'); segment.nodes.forEach(el => frag.appendChild(el.cloneNode(true)));
       const counts = {}; APP_CONFIG.weeklySections.forEach(s => counts[s.className] = frag.querySelectorAll(`.${s.className}`).length);
-      let unwrapped = false;
-      Array.from(frag.children).forEach(child => {
-        if (child.nodeType === Node.ELEMENT_NODE && !child.matches(APP_CONFIG.allowedWrapperSelectors) && !child.matches('h1, hr')) {
-          if (child.textContent.trim() !== '') unwrapped = true;
+      const loose = Array.from(frag.children).filter(child =>
+        !child.matches(APP_CONFIG.allowedWrapperSelectors) && !child.matches('h1, hr') && child.textContent.trim() !== ''
+      );
+      const misc = Array.from(frag.querySelectorAll('.misc')).filter(el => el.textContent.trim() !== '');
+      let emptySectionCount = 0;
+      APP_CONFIG.weeklySections.forEach(s => {
+        const count = counts[s.className];
+        if (count === 0) recommendations.push(`Week ${segment.number} is missing the ${s.name} section.`);
+        if (count > 1) recommendations.push(`Week ${segment.number} has ${count} ${s.name} sections; expected one.`);
+        if (count === 1) {
+          const wrapper = frag.querySelector(`.${s.className}`);
+          if (wrapper && !wrapper.textContent.trim()) {
+            emptySectionCount++;
+            recommendations.push(`Week ${segment.number} has an empty ${s.name} section.`);
+          }
         }
       });
-      if (unwrapped) anyUnwrapped = true;
-      weeklyReportData.push({weekNumber, cleanText, counts, unwrapped});
-      APP_CONFIG.weeklySections.forEach(s => {
-        const c = counts[s.className];
-        if (c === 0) { issuesFound = true; recommendations.push(`Week ${weekNumber} is missing a ${s.name} section.`); }
-        if (c > 1)  { issuesFound = true; recommendations.push(`Week ${weekNumber} has too many ${s.name} sections (found ${c}, expected 1).`); }
-      });
-      if (unwrapped) { issuesFound = true; recommendations.push(`Week ${weekNumber} has unwrapped content.`); }
+      const reviewCount = loose.length + misc.length + emptySectionCount + frag.querySelectorAll('[data-cdt-needs-review="true"]').length;
+      if (loose.length) recommendations.push(`Week ${segment.number} has ${loose.length} item${loose.length === 1 ? '' : 's'} outside a recognized section.`);
+      if (misc.length) recommendations.push(`Week ${segment.number} has Other Content that still needs review.`);
+      return { ...segment, counts, looseCount: loose.length, miscCount: misc.length, reviewCount, fixes: getElementFixes(frag) };
     });
+
+    if (!weeks.length) recommendations.push('No weekly topic headings were found.');
+    const seenNumbers = new Set();
+    weeks.forEach(week => {
+      if (seenNumbers.has(week.number)) recommendations.push(`Week ${week.number} appears more than once.`);
+      seenNumbers.add(week.number);
+    });
+    if (weeks.length) {
+      const maxWeek = Math.max(...weeks.map(week => week.number));
+      for (let expected = 1; expected <= maxWeek; expected++) {
+        if (!seenNumbers.has(expected)) recommendations.push(`Week ${expected} heading is missing.`);
+      }
+    }
+    const fixes = getElementFixes(doc.body);
+    return { doc, topLevel, weeks, recommendations: [...new Set(recommendations)], fixes, issuesFound: recommendations.length > 0 };
+  }
+
+  function generateSectionPresenceReport(htmlContent) {
+    const analysis = analyzeDocumentStructure(htmlContent);
+    const { topLevel, weeks, recommendations, fixes, issuesFound } = analysis;
 
     let html = '<h4>Document Structure Report</h4>';
     if (issuesFound) {
-      html += `<p style="color:#dc3545;font-weight:700">Issues detected. Please review recommendations.</p>`;
-      topLevelErrors.forEach(e => html += `<p style="color:#dc3545;padding-left:12px">${e}</p>`);
+      html += '<p style="color:#dc3545;font-weight:700">Some content still needs review.</p>';
+    } else if (fixes.length) {
+      html += '<p style="color:#2563eb;font-weight:700">Ready. Formatting variations were corrected automatically.</p>';
     } else {
       html += `<p style="color:#28a745;font-weight:700">Document structure looks good!</p>`;
     }
 
     html += '<h5>Top-Level Sections</h5><table><thead><tr><th>Section</th><th>Present?</th><th>Count</th></tr></thead><tbody>';
-    APP_CONFIG.topLevelSections.forEach(s => {
-      const c = doc.querySelectorAll(`.${s.className}`).length;
-      html += `<tr><td>${s.name}</td><td>${c>0?'Yes':'No'}</td><td>${c}</td></tr>`;
+    topLevel.forEach(s => {
+      html += `<tr><td>${escapeHtml(s.name)}</td><td>${s.count>0?'Yes':'No'}</td><td>${s.count}</td></tr>`;
     });
     html += '</tbody></table>';
 
     html += '<h5 style="margin-top:10px">Weekly Sections</h5>';
-    if (anyUnwrapped) html += `<p style="color:#dc3545">Unwrapped content found. This will be handled by "Clean Up".</p>`;
-    html += '<table><thead><tr><th>Week</th><th>LO</th><th>A&R</th><th>Assignments</th><th>Unwrapped</th></tr></thead><tbody>';
-    weeklyReportData.forEach(d => {
-      html += `<tr><td>Week ${d.weekNumber}: ${d.cleanText}</td><td>${d.counts.LO}</td><td>${d.counts.activities}</td><td>${d.counts.assignments}</td><td>${d.unwrapped?'1':'0'}</td></tr>`;
+    html += '<table><thead><tr><th>Week</th><th>LO</th><th>A&R</th><th>Assignments</th><th>Review</th><th>Status</th></tr></thead><tbody>';
+    weeks.forEach(d => {
+      const missing = APP_CONFIG.weeklySections.some(section => d.counts[section.className] !== 1);
+      const status = missing || d.reviewCount ? 'Needs review' : (d.fixes.length ? 'Auto-corrected' : 'Ready');
+      html += `<tr><td>Week ${d.number}: ${escapeHtml(d.title)}</td><td>${d.counts.LO}</td><td>${d.counts.activities}</td><td>${d.counts.assignments}</td><td>${d.reviewCount}</td><td>${status}</td></tr>`;
     });
     html += '</tbody></table>';
+    if (fixes.length) {
+      html += '<h5 style="margin-top:10px">Automatic Corrections</h5><ul>';
+      fixes.forEach(fix => { html += `<li>${escapeHtml(fix)}</li>`; });
+      html += '</ul>';
+    }
     if (issuesFound) {
       html += '<h5 style="margin-top:10px">Recommendations</h5><ul>';
-      recommendations.forEach(r => html += `<li>${r}</li>`);
+      recommendations.forEach(r => html += `<li>${escapeHtml(r)}</li>`);
       html += '</ul>';
     }
     return html;
   }
 
-  // Gentle cleanup: idempotent wrapper. Never create nested .misc or move nodes already inside .misc.
+  // Gentle cleanup: keep unclassified content inside its original week.
   const CLEANUP_OPTIONS = { mode: 'wrap' }; // 'wrap' or 'delete'
 
   function removeExtraContent(htmlContent) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(htmlContent, 'text/html');
-    const body = doc.body;
-
-    const allowed = APP_CONFIG.allowedWrapperSelectors;
-
-    // Ensure a single .misc bucket exists and do not create another
-    let bucket = body.querySelector(':scope > .misc');
-    if (!bucket && CLEANUP_OPTIONS.mode === 'wrap') {
-      bucket = doc.createElement('div');
-      bucket.className = 'misc';
-      const h2 = doc.createElement('h2'); h2.textContent = 'Other Content';
-      bucket.appendChild(h2);
-      body.appendChild(bucket);
-    }
-
-    // Only inspect direct children of body to avoid re-wrapping inside sections
-    const nodes = Array.from(body.children);
-    for (const node of nodes) {
-      // Skip headings, allowed wrappers, and the bucket itself
-      if (node.tagName === 'H1') continue;
-      if (node.matches(allowed)) continue;
-      if (node === bucket) continue;
-      // Skip empty text-like blocks
-      if (node.nodeType === Node.ELEMENT_NODE && node.textContent.trim() === '' && node.children.length === 0) { node.remove(); continue; }
-      // If already inside .misc for some reason, skip
-      if (node.closest('.misc')) continue;
-
-      if (CLEANUP_OPTIONS.mode === 'wrap') {
-        bucket.appendChild(node);
-      } else {
-        node.remove();
+    cleanupHtml(doc);
+    getWeeklySegments(doc).forEach(segment => {
+      const loose = segment.nodes.filter(node =>
+        !node.matches(APP_CONFIG.allowedWrapperSelectors) && !node.matches('h1, hr') && node.textContent.trim() !== ''
+      );
+      if (!loose.length) return;
+      if (CLEANUP_OPTIONS.mode === 'delete') { loose.forEach(node => node.remove()); return; }
+      let bucket = segment.nodes.find(node => node.matches && node.matches('.misc'));
+      if (!bucket) {
+        bucket = doc.createElement('div'); bucket.className = 'misc';
+        bucket.setAttribute('data-cdt-section', 'misc');
+        const h2 = doc.createElement('h2'); h2.textContent = `Other Content — Week ${segment.number}`; bucket.appendChild(h2);
+        loose[0].before(bucket);
       }
-    }
-    return body.innerHTML;
+      loose.forEach(node => bucket.appendChild(node));
+      addElementFix(bucket, `Week ${segment.number}: kept unclassified content with its original week in Other Content.`);
+    });
+    return doc.body.innerHTML;
   }
+
+  function runStructureSelfTests() {
+    const results = [];
+    const check = (name, condition, detail = '') => {
+      if (!condition) throw new Error(`Structure test failed: ${name}${detail ? ` - ${detail}` : ''}`);
+      results.push({ test: name, status: 'passed' });
+    };
+    const fixture = `
+      <h1>Course Description</h1><p>Description</p>
+      <h1>Program Learning Outcomes</h1><p>PLO</p>
+      <h1>Course Learning Outcomes</h1><p>CLO</p>
+      <h1>Required Course Materials</h1><p>Materials</p>
+      <p>Week 1: Test Week</p><p>&nbsp;</p>
+      <p>Learning Objectives</p>
+      <table><tr><td><p>1.1 A plain-paragraph objective.</p></td><td>CLO1</td></tr></table>
+      <h1>Activities &amp; Resources</h1>
+      <table><tr><td>Reading</td><td>Week 1</td></tr><tr><td><p>Read chapter 1.</p></td><td></td></tr></table>
+      <table><tr><td>Lecture</td><td>Week 1</td></tr><tr><td><p>Review lecture 1.</p></td><td></td></tr></table>
+      <p>Assignment</p>
+      <table><tr><td>Discussion</td><td>1.1</td></tr><tr><td><p>Post a response.</p><p><strong>Day 7 of</strong> <strong>Week</strong> <strong>2</strong>.</p><p><strong>Day 7 of</strong><strong>Week</strong><strong>3</strong>.</p></td><td></td></tr></table>`;
+    const processed = processHtml(fixture);
+    const analysis = analyzeDocumentStructure(processed);
+    check('wrong-style week heading is recognized', analysis.weeks.length === 1 && analysis.weeks[0].number === 1);
+    check('singular Assignment is normalized', analysis.weeks[0].counts.assignments === 1);
+    check('plain-paragraph objectives are extracted', analysis.weeks[0].counts.LO === 1 && /plain-paragraph objective/i.test(processed));
+    check('multiple A&R tables remain one semantic section', analysis.weeks[0].counts.activities === 1);
+    check('safe corrections are recorded', analysis.fixes.length >= 3);
+    check('processing is idempotent', processHtml(processed) === processed);
+    const processedDoc = new DOMParser().parseFromString(processed, 'text/html');
+    const deadlines = Array.from(processedDoc.querySelectorAll('.assignments strong')).map(element => element.textContent.trim());
+    check('bold deadline runs keep and repair spaces', deadlines.includes('Day 7 of Week 2') && deadlines.includes('Day 7 of Week 3') && !/ofWeek\d/i.test(processed));
+
+    const listFixture = fixture.replace(
+      '<table><tr><td><p>1.1 A plain-paragraph objective.</p></td><td>CLO1</td></tr></table>',
+      '<table><tr><td><ol><li>First objective.</li><li>Second objective.</li></ol></td><td>CLO1</td></tr></table>'
+    );
+    const listProcessed = processHtml(listFixture);
+    const listDoc = new DOMParser().parseFromString(listProcessed, 'text/html');
+    const listWrapper = listDoc.querySelector('.LO');
+    check('list objectives become separate paragraphs', !!listWrapper && listWrapper.querySelectorAll(':scope > p').length === 2 && !listWrapper.querySelector('ol, ul'));
+    const duplicateList = listDoc.createElement('ol');
+    duplicateList.innerHTML = '<li>First objective.</li><li>Second objective.</li>';
+    listWrapper.prepend(duplicateList);
+    const repairedDoc = new DOMParser().parseFromString(processHtml(listDoc.body.innerHTML), 'text/html');
+    const repairedWrapper = repairedDoc.querySelector('.LO');
+    check('existing list-plus-paragraph duplicates are repaired', !!repairedWrapper && repairedWrapper.querySelectorAll(':scope > p').length === 2 && !repairedWrapper.querySelector('ol, ul'));
+
+    const nestedListHtml = restoreWordListStructure(
+      '<ol><li>First numbered item</li><li>Parent numbered item:</li><li>First lettered item</li><li>Second lettered item</li></ol>',
+      [
+        { matchText: normalizeListMatchText('First numbered item'), numId: '10', level: 0, format: 'decimal', start: 1, left: 720 },
+        { matchText: normalizeListMatchText('Parent numbered item:'), numId: '10', level: 0, format: 'decimal', start: 1, left: 720 },
+        { matchText: normalizeListMatchText('First lettered item'), numId: '11', level: 0, format: 'lowerLetter', start: 1, left: 1080 },
+        { matchText: normalizeListMatchText('Second lettered item'), numId: '11', level: 0, format: 'lowerLetter', start: 1, left: 1080 }
+      ]
+    );
+    const nestedListDoc = new DOMParser().parseFromString(nestedListHtml, 'text/html');
+    const nestedOuter = nestedListDoc.querySelector('body > ol');
+    const nestedChildren = nestedOuter ? nestedOuter.querySelectorAll(':scope > li') : [];
+    const nestedLetters = nestedChildren[1]?.querySelector(':scope > ol[type="a"]');
+    check('Word number and letter list hierarchy is restored', nestedChildren.length === 2 && nestedLetters?.querySelectorAll(':scope > li').length === 2);
+
+    const falseBulletHtml = restoreWordListStructure(
+      '<ul><li>Intro instruction</li><li>Case directions:<ul><li><ul><li>Case narrative</li><li>Real question</li></ul></li></ul></li><li>Closing instruction</li></ul>',
+      [
+        { matchText: normalizeListMatchText('Intro instruction'), isList: false },
+        { matchText: normalizeListMatchText('Case directions:'), isList: false },
+        { matchText: normalizeListMatchText('Case narrative'), isList: false },
+        { matchText: normalizeListMatchText('Real question'), isList: true, numId: '20', level: 0, format: 'bullet', left: 720 },
+        { matchText: normalizeListMatchText('Closing instruction'), isList: false }
+      ]
+    );
+    const falseBulletDoc = new DOMParser().parseFromString(falseBulletHtml, 'text/html');
+    const falseBulletTags = Array.from(falseBulletDoc.body.children).map(element => element.tagName).join(',');
+    check('explicit Word non-list paragraphs are unwrapped from false bullets', falseBulletTags === 'P,P,P,UL,P' && falseBulletDoc.querySelectorAll('li').length === 1 && /Real question/.test(falseBulletDoc.querySelector('li')?.textContent || ''));
+
+    const missingDoc = new DOMParser().parseFromString(processed, 'text/html');
+    missingDoc.querySelector('.assignments')?.remove();
+    const missing = analyzeDocumentStructure(missingDoc.body.innerHTML);
+    check('true missing sections remain review items', missing.recommendations.some(item => /missing the Assignments section/i.test(item)));
+
+    const looseFixture = fixture.replace('<p>Learning Objectives</p>', '<p>Loose weekly note</p><p>Learning Objectives</p>');
+    const looseProcessed = processHtml(looseFixture);
+    check('loose weekly content is detected', analyzeDocumentStructure(looseProcessed).weeks[0].looseCount === 1);
+    const cleaned = removeExtraContent(looseProcessed);
+    const cleanedDoc = new DOMParser().parseFromString(cleaned, 'text/html');
+    const localBucket = cleanedDoc.querySelector('h1.wk-topic ~ .misc');
+    check('cleanup keeps loose content in the same week', !!localBucket && /Loose weekly note/.test(localBucket.textContent));
+
+    console.table(results);
+    return { passed: results.length, results };
+  }
+
+  Object.assign(window.CanvasDocxTools, {
+    processHtml,
+    extractDocxListMetadata,
+    restoreWordListStructure,
+    analyzeDocumentStructure,
+    generateSectionPresenceReport,
+    removeExtraContent,
+    runStructureSelfTests
+  });
 
   // ---------------------------------------------------------------------------
   // 4.5) Section preview styles & legend
@@ -560,6 +1363,8 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
   async function convertAndReplace(fileOpt) {
     await waitForEditor();
     await ensureMammoth();
+    try { await ensureJSZip(); }
+    catch (error) { console.warn('JSZip could not be loaded; Word list repair will be skipped.', error); }
 
     const file = fileOpt || (fileInput && fileInput.files && fileInput.files[0]);
     if (!file) { alert('Choose a .docx file first, or drop one on the bar.'); return; }
@@ -568,6 +1373,12 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
     if (!(isDocxByName || isDocxByType)) { alert('Please provide a .docx file.'); return; }
 
     const arrayBuffer = await file.arrayBuffer();
+    let listMetadata = [];
+    try {
+      listMetadata = await extractDocxListMetadata(arrayBuffer.slice(0));
+    } catch (error) {
+      console.warn('Word list metadata could not be read; continuing with Mammoth list conversion.', error);
+    }
     const result = await mammoth.convertToHtml({ arrayBuffer }, { styleMap: APP_CONFIG.styleMap });
 
     if (Array.isArray(result.messages) && result.messages.length) {
@@ -576,7 +1387,8 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
       showToast('Converted with warnings. Check console.');
     }
 
-    const processed = processHtml(result.value);
+    const sourceAwareHtml = restoreWordListStructure(result.value, listMetadata);
+    const processed = processHtml(sourceAwareHtml);
     setRCEHtml(processed);
     if (fileInput) fileInput.value = '';
     showToast('Converted and inserted into the RCE.');
@@ -719,9 +1531,9 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
   btnCleanup.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation();
     document.getElementById('cdt-modal-title').textContent = 'Confirm Cleanup';
     document.getElementById('cdt-modal-body').innerHTML = `
-      <p>This will move any content that is not in a standard section like
-      "Learning Objectives", "Activities and Resources", or "Assignments" into an "Other Content" bucket.</p>
-      <p>Cleanup is idempotent and will not create nested "Other Content" sections.</p>
+      <p>This will place content that is not in a standard section like
+      "Learning Objectives", "Activities and Resources", or "Assignments" into an "Other Content" bucket for its current week.</p>
+      <p>Nothing will be moved to another week. Cleanup is idempotent and can be undone.</p>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
         <button class="btn gray" type="button" id="cdt-cancel-clean">Cancel</button>
         <button class="btn" type="button" id="cdt-confirm-clean">Yes, Clean Up</button>
@@ -842,6 +1654,6 @@ h1.wk-topic { color:#1f2937; border-bottom:2px solid #e5e7eb; padding-bottom:4px
   // Make sure editor exists before first use
   waitForEditor();
 
-  console.log('Canvas DOCX → RCE Toolbelt loaded (v1.6.0).');
+  console.log(`Canvas DOCX → RCE Toolbelt loaded (v${TOOLBELT_VERSION}).`);
 }
 // === end =====================================================================
