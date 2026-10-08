@@ -1,1260 +1,748 @@
-(async () => {
-  /* =============== Canvas Quiz -> Printable View (Pro v2.7) ===============
-     - Single configuration modal
-     - Print Preview and Microsoft Word (.doc)
-     - Cleaner lettered answer choices
-     - Optional Answer Key
-     - Optional deterministic answer shuffling
-     - Random-group handling without showing a notice in the output
-     - Screen-only print tip
-     - Word-friendly table layout
-  ===================================================================== */
+(async function canvasQuizPrinterPro() {
+  /* Canvas Classic Quiz Printer Pro v3.0
+     Standalone bookmarklet script. Generates genuine DOCX and print/PDF.
+     Read-only Canvas API, with no external library dependency.
+  */
+  "use strict";
 
-  /* ---------- UI: Spinner ---------- */
-  function showSpinner(msg = 'Processing...') {
-    document.getElementById('quiz-print-spinner')?.remove();
-
-    const el = document.createElement('div');
-    el.id = 'quiz-print-spinner';
-
-    el.innerHTML = `
-      <div style="
-        position:fixed;
-        inset:0;
-        background:rgba(0,0,0,.25);
-        z-index:999999;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-      ">
-        <div style="
-          background:#fff;
-          border-radius:10px;
-          padding:14px 16px;
-          min-width:260px;
-          box-shadow:0 10px 30px rgba(0,0,0,.25);
-          font:14px/1.3 system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif;
-        ">
-          <div style="display:flex;gap:10px;align-items:center;">
-            <div style="
-              width:18px;
-              height:18px;
-              border:3px solid #aaa;
-              border-top-color:transparent;
-              border-radius:50%;
-              animation:quizPrintSpin .8s linear infinite;
-            "></div>
-            <div>${msg}</div>
-          </div>
-        </div>
-      </div>
-
-      <style>
-        @keyframes quizPrintSpin {
-          to { transform: rotate(360deg); }
-        }
-      </style>
-    `;
-
-    document.body.appendChild(el);
+  const pathMatch = location.pathname.match(/^\/courses\/(\d+)\/quizzes\/(\d+)\/?$/);
+  if (!pathMatch) {
+    alert("Open the main details page of a Canvas Classic Quiz first.");
+    return;
   }
+  const courseId = pathMatch[1];
+  const quizId = pathMatch[2];
+  const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  const W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+  const R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+  const A = "http://schemas.openxmlformats.org/drawingml/2006/main";
+  const WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+  const PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture";
+  const PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships";
 
-  function hideSpinner() {
-    document.getElementById('quiz-print-spinner')?.remove();
+  function esc(v) {
+    return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;")
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "");
   }
-
-  /* ---------- UI: Toast ---------- */
-  function toast(msg, type = 'success') {
-    const el = document.createElement('div');
-    const bg = type === 'error' ? '#EF4444' : '#10B981';
-
-    el.innerHTML = `<div style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
-      background:${bg};color:white;padding:12px 18px;border-radius:8px;
-      box-shadow:0 10px 15px rgba(0,0,0,0.15);z-index:999999;
-      font:13px system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif;font-weight:600;">
-      ${msg}
-    </div>`;
-
-    document.body.appendChild(el);
-    setTimeout(() => el.remove(), 3200);
-  }
-
-  /* ---------- UI: Configuration Modal ---------- */
-  function getPrintOptions() {
-    return new Promise((resolve) => {
-      const overlay = document.createElement('div');
-      overlay.id = 'quiz-print-modal';
-
-      Object.assign(overlay.style, {
-        position: 'fixed',
-        inset: '0',
-        backgroundColor: 'rgba(0,0,0,0.5)',
-        backdropFilter: 'blur(2px)',
-        zIndex: '999999',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        fontFamily: 'system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
-      });
-
-      overlay.innerHTML = `
-        <div style="background:white;width:100%;max-width:440px;border-radius:10px;
-                    box-shadow:0 20px 25px rgba(0,0,0,0.15);overflow:hidden;">
-          <div style="padding:18px 20px;border-bottom:1px solid #e5e7eb;background:#f9fafb;">
-            <div style="margin:0;font-size:1.05rem;font-weight:700;color:#111827;">Quiz Print Options</div>
-            <div style="margin-top:6px;font-size:0.86rem;color:#6b7280;">Choose your output and formatting.</div>
-          </div>
-
-          <div style="padding:18px 20px;display:flex;flex-direction:column;gap:12px;">
-            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
-              <input type="checkbox" id="opt-points" checked style="width:16px;height:16px;">
-              <span style="font-size:0.95rem;color:#374151;">Show point values</span>
-            </label>
-
-            <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;">
-              <input type="checkbox" id="opt-groups" checked style="width:16px;height:16px;margin-top:3px;">
-              <div style="display:flex;flex-direction:column;">
-                <span style="font-size:0.95rem;color:#374151;">Random draw groups: show 1 sample question</span>
-                <span style="font-size:0.78rem;color:#6b7280;">If the quiz draws randomly from a pool, print one example item per group.</span>
-              </div>
-            </label>
-
-            <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;">
-              <input type="checkbox" id="opt-shuffle" style="width:16px;height:16px;margin-top:3px;">
-              <div style="display:flex;flex-direction:column;">
-                <span style="font-size:0.95rem;color:#374151;">Shuffle answer choices</span>
-                <span style="font-size:0.78rem;color:#6b7280;">Uses a consistent shuffle so the Answer Key still matches.</span>
-              </div>
-            </label>
-
-            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
-              <input type="checkbox" id="opt-key" style="width:16px;height:16px;">
-              <span style="font-size:0.95rem;color:#374151;">Include Answer Key</span>
-            </label>
-
-            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
-              <input type="checkbox" id="opt-link" style="width:16px;height:16px;">
-              <span style="font-size:0.95rem;color:#374151;">Include link to online quiz</span>
-            </label>
-
-            <div style="margin-top:6px;padding-top:12px;border-top:1px solid #eee;">
-              <label style="font-size:0.75rem;font-weight:800;color:#6b7280;display:block;margin-bottom:6px;letter-spacing:0.6px;">OUTPUT</label>
-              <select id="opt-format" style="width:100%;padding:9px;border:1px solid #ccc;border-radius:6px;background:#fff;font-size:14px;">
-                <option value="print">Print Preview (HTML/PDF)</option>
-                <option value="word">Microsoft Word (.doc)</option>
-              </select>
-              <div style="margin-top:8px;font-size:0.78rem;color:#6b7280;">Word export uses Word-compatible HTML inside a .doc file.</div>
-            </div>
-          </div>
-
-          <div style="padding:14px 20px;background:#f9fafb;border-top:1px solid #e5e7eb;display:flex;justify-content:flex-end;gap:12px;">
-            <button id="btn-cancel" style="padding:8px 14px;background:white;border:1px solid #d1d5db;border-radius:8px;color:#374151;font-weight:700;cursor:pointer;">Cancel</button>
-            <button id="btn-generate" style="padding:8px 14px;background:#008EE2;border:1px solid #008EE2;border-radius:8px;color:white;font-weight:800;cursor:pointer;">Generate</button>
-          </div>
-        </div>
-      `;
-
-      document.body.appendChild(overlay);
-
-      const close = () => overlay.remove();
-
-      overlay.querySelector('#btn-cancel').onclick = () => {
-        close();
-        resolve(null);
-      };
-
-      overlay.querySelector('#btn-generate').onclick = (e) => {
-        const btn = e.currentTarget;
-        btn.textContent = 'Working...';
-        btn.disabled = true;
-
-        const options = {
-          showPoints: overlay.querySelector('#opt-points').checked,
-          onePerGroup: overlay.querySelector('#opt-groups').checked,
-          showKey: overlay.querySelector('#opt-key').checked,
-          showLink: overlay.querySelector('#opt-link').checked,
-          shuffleAnswers: overlay.querySelector('#opt-shuffle').checked,
-          format: overlay.querySelector('#opt-format').value
-        };
-
-        resolve({ options, close });
-      };
-    });
-  }
-
-  /* ---------- Canvas Page Checks ---------- */
-  function assertClassicQuizPage() {
-    if (!/\/courses\/\d+\/quizzes\/\d+/.test(location.pathname)) {
-      throw new Error('Open a Classic Quiz page first: /courses/:course_id/quizzes/:quiz_id');
-    }
-
-    const isNewQuizzes = !!document.querySelector('[data-testid="lti-launch-iframe"], iframe[src*="quizzes-next"]');
-
-    if (isNewQuizzes) {
-      throw new Error('This script works with Classic Quizzes. New Quizzes uses a different print workflow.');
-    }
-  }
-
-  function getCourseAndQuizIds() {
-    const match = location.pathname.match(/\/courses\/(\d+)\/quizzes\/(\d+)/);
-
-    if (!match) {
-      throw new Error('Could not determine the course and quiz IDs.');
-    }
-
-    return {
-      course_id: match[1],
-      quiz_id: match[2]
-    };
-  }
-
-  /* ---------- Canvas API ---------- */
-  async function canvasGet(url) {
-    const response = await fetch(url, {
-      headers: {
-        Accept: 'application/json'
+  function clean(html) {
+    const div = document.createElement("div");
+    div.innerHTML = html || "";
+    div.querySelectorAll("script,style,link,iframe,object,embed,form,button").forEach(n => n.remove());
+    div.querySelectorAll("*").forEach(n => {
+      for (const a of [...n.attributes]) {
+        if (/^on/i.test(a.name) || (["href","src"].includes(a.name.toLowerCase()) &&
+          /^\s*javascript:/i.test(a.value))) n.removeAttribute(a.name);
       }
     });
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new Error(`Canvas API error ${response.status}: ${body || response.statusText}`);
-    }
-
-    return response.json();
+    return div.innerHTML;
   }
-
-  async function getAllPages(url) {
-    const results = [];
-    let next = url;
-
-    while (next) {
-      const response = await fetch(next, {
-        headers: {
-          Accept: 'application/json'
-        }
-      });
-
-      if (!response.ok) {
-        const body = await response.text().catch(() => '');
-        throw new Error(`Canvas API error ${response.status}: ${body || response.statusText}`);
-      }
-
-      const data = await response.json();
-      results.push(...data);
-
-      const link = response.headers.get('Link');
-
-      if (link) {
-        const nextMatch = link.match(/<([^>]+)>;\s*rel="next"/);
-        next = nextMatch ? nextMatch[1] : null;
-      } else {
-        next = null;
-      }
-    }
-
-    return results;
+  function plain(html) {
+    const div = document.createElement("div");
+    div.innerHTML = clean(html);
+    return (div.textContent || "").trim();
   }
-
-  /* ---------- HTML Helpers ---------- */
-  function htmlSafe(value) {
-    const el = document.createElement('div');
-    el.textContent = value ?? '';
-    return el.innerHTML;
+  function answerHTML(a) {
+    return a?.html || a?.answer_html || a?.text || a?.answer_text || "";
   }
-
-  function cleanCanvasHTML(html) {
-    const wrapper = document.createElement('div');
-    wrapper.innerHTML = html || '';
-
-    wrapper.querySelectorAll('script,style,link,iframe').forEach((el) => el.remove());
-
-    return wrapper.innerHTML;
+  function correct(a) {
+    return a?.is_correct === true || Number(a?.weight ?? a?.answer_weight ?? 0) > 0;
   }
-
-  function isCorrect(answer) {
-    return !!(
-      answer &&
-      (
-        answer.is_correct === true ||
-        (
-          typeof answer.weight === 'number' &&
-          answer.weight > 0
-        )
-      )
-    );
-  }
-
-  function optionLabel(index) {
-    let label = '';
-    let n = index;
-
+  function letter(n) {
+    let str = "";
     do {
-      label = String.fromCharCode(65 + (n % 26)) + label;
+      str = String.fromCharCode(65 + n % 26) + str;
       n = Math.floor(n / 26) - 1;
     } while (n >= 0);
-
-    return label;
+    return str;
   }
-
-  /* ---------- Deterministic Shuffle ---------- */
-  function hashStringTo32BitInt(str) {
+  function seededShuffle(items, seed) {
     let hash = 2166136261;
-
-    for (let i = 0; i < str.length; i++) {
-      hash ^= str.charCodeAt(i);
+    for (const ch of seed) {
+      hash ^= ch.charCodeAt(0);
       hash = Math.imul(hash, 16777619);
     }
-
-    return hash >>> 0;
-  }
-
-  function mulberry32(seed) {
-    let t = seed >>> 0;
-
-    return function () {
-      t += 0x6D2B79F5;
-
-      let r = Math.imul(t ^ (t >>> 15), 1 | t);
-      r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
-
-      return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
-    };
-  }
-
-  function shuffleArrayDeterministic(array, seedString) {
-    const arr = [...array];
-    const random = mulberry32(hashStringTo32BitInt(seedString));
-
-    for (let i = arr.length - 1; i > 0; i--) {
-      const j = Math.floor(random() * (i + 1));
-      [arr[i], arr[j]] = [arr[j], arr[i]];
+    let state = hash >>> 0;
+    function rnd() {
+      state += 0x6d2b79f5;
+      let v = Math.imul(state ^ (state >>> 15), 1 | state);
+      v ^= v + Math.imul(v ^ (v >>> 7), 61 | v);
+      return ((v ^ (v >>> 14)) >>> 0) / 4294967296;
     }
-
-    return arr;
+    const result = [...items];
+    for (let i = result.length - 1; i > 0; i--) {
+      const j = Math.floor(rnd() * (i + 1));
+      [result[i], result[j]] = [result[j], result[i]];
+    }
+    return result;
+  }
+  function answersFor(q, opt) {
+    const items = q.answers || [];
+    return opt.shuffle && ["multiple_choice_question","multiple_answers_question"].includes(q.question_type)
+      ? seededShuffle(items, `${courseId}:${quizId}:${q.id}:answers`)
+      : [...items];
+  }
+  function includedQuestions(questions, opt) {
+    const groups = new Set();
+    return questions.filter(q => {
+      if (!opt.onePerGroup || !q.quiz_group_id) return true;
+      if (groups.has(q.quiz_group_id)) return false;
+      groups.add(q.quiz_group_id);
+      return true;
+    });
+  }
+  function numericAnswer(q) {
+    return (q.answers || []).map(a => {
+      if (a.exact !== undefined) return a.margin ? `${a.exact} ± ${a.margin}` : `${a.exact}`;
+      if (a.start !== undefined && a.end !== undefined) return `${a.start} to ${a.end}`;
+      if (a.approximate !== undefined) return `Approximately ${a.approximate}`;
+      return `${a.numerical_answer ?? a.text ?? ""}`;
+    }).filter(Boolean).join(" | ");
+  }
+  function blankKey(q, id) {
+    return (q.answers || [])
+      .filter(a => `${a.blank_id}` === `${id}` && (a.weight === undefined || correct(a)))
+      .map(a => plain(answerHTML(a))).filter(Boolean).join(" | ");
+  }
+  function fillBlanks(html, q, showKey) {
+    const div = document.createElement("div");
+    div.innerHTML = clean(html);
+    const walker = document.createTreeWalker(div, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    for (const node of nodes) {
+      const text = node.nodeValue || "";
+      if (!/\[[^\]]+\]/.test(text)) continue;
+      const f = document.createDocumentFragment();
+      let pos = 0;
+      const regex = /\[([^\]]+)\]/g;
+      for (const m of text.matchAll(regex)) {
+        if (m.index > pos) f.appendChild(document.createTextNode(text.slice(pos, m.index)));
+        const span = document.createElement("span");
+        span.className = "blank";
+        span.textContent = "____________";
+        f.appendChild(span);
+        const key = showKey ? blankKey(q, m[1]) : "";
+        if (key) f.appendChild(document.createTextNode(` (${key})`));
+        pos = m.index + m[0].length;
+      }
+      if (pos < text.length) f.appendChild(document.createTextNode(text.slice(pos)));
+      node.replaceWith(f);
+    }
+    return div.innerHTML;
+  }
+  function keyFor(q, opt) {
+    const type = q.question_type;
+    if (["multiple_choice_question","multiple_answers_question","true_false_question"].includes(type)) {
+      return answersFor(q, opt).map((a, i) => correct(a) ? `${letter(i)}. ${plain(answerHTML(a))}` : "")
+        .filter(Boolean).join(" | ") || "No correct choice identified";
+    }
+    if (type === "short_answer_question") {
+      return (q.answers || []).map(a => plain(answerHTML(a))).filter(Boolean).join(" | ") || "Review manually";
+    }
+    if (["fill_in_multiple_blanks_question","multiple_dropdowns_question"].includes(type)) {
+      return [...new Set((q.answers || []).map(a => a.blank_id).filter(Boolean))]
+        .map(id => `${id}: ${blankKey(q, id)}`).join("; ") || "Review manually";
+    }
+    if (type === "matching_question") {
+      return (q.answers || []).map((a, i) =>
+        `${i + 1}. ${plain(a.match_question || a.answer_match_left || "")}: ${plain(a.text || a.answer_match_right || "")}`
+      ).join("; ") || "Review manually";
+    }
+    if (type === "numerical_question") return numericAnswer(q) || "Review manually";
+    if (type === "essay_question") return "Manual grading";
+    if (type === "file_upload_question") return "File upload";
+    if (type === "calculated_question") return "Calculated values vary";
+    return "Review manually";
   }
 
-  /* ---------- Question Rendering ---------- */
-  function renderAnswerLines(count, mode) {
-    const height = mode === 'word' ? 22 : 26;
+  async function getJSON(url) {
+    const r = await fetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (!r.ok) throw new Error(`Canvas API ${r.status}: ${(await r.text()).slice(0, 350)}`);
+    return r.json();
+  }
+  async function getPages(url) {
+    const out = [];
+    let next = url;
+    while (next) {
+      const r = await fetch(next, { credentials: "same-origin", headers: { Accept: "application/json" } });
+      if (!r.ok) throw new Error(`Canvas API ${r.status}: ${(await r.text()).slice(0, 350)}`);
+      const data = await r.json();
+      if (!Array.isArray(data)) throw new Error("Canvas returned unexpected question data.");
+      out.push(...data);
+      next = null;
+      for (const part of (r.headers.get("Link") || "").split(",")) {
+        if (/rel=["']?next["']?/.test(part)) {
+          next = part.match(/<([^>]+)>/)?.[1] || null;
+          break;
+        }
+      }
+    }
+    return out;
+  }
 
-    return `
-      <div class="answer-lines">
-        ${Array.from({ length: count })
-          .map(() => `<div class="line" style="height:${height}px;"></div>`)
-          .join('')}
+  const existing = document.getElementById("quiz-printer-pro");
+  if (existing) existing.remove();
+  const dialog = document.createElement("div");
+  dialog.id = "quiz-printer-pro";
+  Object.assign(dialog.style, {
+    position:"fixed",inset:"0",zIndex:"999999",display:"flex",alignItems:"center",
+    justifyContent:"center",background:"rgba(0,0,0,.55)",fontFamily:"Arial,sans-serif"
+  });
+  dialog.innerHTML = `
+    <section style="width:450px;max-width:95vw;max-height:94vh;overflow:auto;background:white;
+      border-radius:10px;box-shadow:0 14px 40px #0004;color:#1e293b">
+      <header style="padding:19px 20px;background:#f8fafc;border-bottom:1px solid #ddd">
+        <h2 style="font-size:19px;margin:0">Canvas Quiz Printer Pro</h2>
+        <p style="margin:6px 0 0;color:#64748b;font-size:13px">Printable quiz and native Word export</p>
+      </header>
+      <div style="padding:20px;display:flex;flex-direction:column;gap:14px;font-size:14px">
+        <label><input id="qp-points" type="checkbox" checked> Show point values</label>
+        <label><input id="qp-groups" type="checkbox" checked> One sample question per random group</label>
+        <label><input id="qp-shuffle" type="checkbox"> Shuffle answer choices</label>
+        <label><input id="qp-key" type="checkbox"> Include correct answers and answer key</label>
+        <label><input id="qp-link" type="checkbox"> Include online quiz link</label>
+        <div style="padding-top:12px;border-top:1px solid #ddd">
+          <label for="qp-format" style="font-size:12px;font-weight:bold;display:block;margin-bottom:6px">OUTPUT FORMAT</label>
+          <select id="qp-format" style="width:100%;padding:10px;background:white;border:1px solid #ccc;border-radius:6px">
+            <option value="print">Print Preview / PDF</option>
+            <option value="docx">Microsoft Word (.docx)</option>
+          </select>
+        </div>
+        <div id="qp-status" role="status" style="font-size:13px;color:#475569;min-height:18px;overflow-wrap:anywhere"></div>
       </div>
-    `;
+      <footer style="padding:14px 20px;border-top:1px solid #ddd;background:#f8fafc;
+        display:flex;gap:10px;justify-content:flex-end">
+        <button id="qp-cancel" style="padding:9px 15px;background:white;border:1px solid #ccc;border-radius:6px;cursor:pointer">Cancel</button>
+        <button id="qp-generate" style="padding:9px 18px;border:0;border-radius:6px;cursor:pointer;
+          background:#003865;color:white;font-weight:bold">Generate</button>
+      </footer>
+    </section>`;
+  document.body.appendChild(dialog);
+  const sel = id => dialog.querySelector(id);
+  const status = msg => { sel("#qp-status").textContent = msg; };
+  const settings = await new Promise(resolve => {
+    sel("#qp-cancel").onclick = () => { dialog.remove(); resolve(null); };
+    sel("#qp-generate").onclick = () => {
+      const opt = {
+        points:sel("#qp-points").checked,
+        onePerGroup:sel("#qp-groups").checked,
+        shuffle:sel("#qp-shuffle").checked,
+        key:sel("#qp-key").checked,
+        link:sel("#qp-link").checked,
+        format:sel("#qp-format").value
+      };
+      let preview = null;
+      if (opt.format === "print") {
+        preview = window.open("", "_blank");
+        if (!preview) {
+          status("Popup blocked. Allow popups for Canvas and try again.");
+          return;
+        }
+        preview.document.body.textContent = "Preparing quiz...";
+      }
+      sel("#qp-generate").disabled = true;
+      sel("#qp-generate").textContent = "Processing...";
+      resolve({opt, preview});
+    };
+  });
+  if (!settings) return;
+  const {opt, preview} = settings;
+
+  function responseLines(n) {
+    return `<div class="response-lines">${Array.from({length:n}, () => '<div class="response-line"></div>').join("")}</div>`;
+  }
+  function matchingTable(q, key) {
+    return `<table class="matching"><thead><tr><th>Item</th><th>Match</th></tr></thead><tbody>${
+      (q.answers || []).map((a,i) => `<tr><td>${clean(a.match_question || a.answer_match_left || `Item ${i + 1}`)}</td>
+        <td>________________________ ${key ? `<strong>${esc(plain(a.text || a.answer_match_right || ""))}</strong>` : ""}</td></tr>`).join("")
+    }</tbody></table>`;
   }
 
-  function renderLetteredOptions(answers, showKey) {
-    const rows = (answers || [])
-      .map((answer, index) => {
-        const answerHtml = cleanCanvasHTML(answer.html || answer.text || '');
-        const correct = showKey && isCorrect(answer);
-
-        return `
-          <tr class="${correct ? 'correct' : ''}">
-            <td class="option-label">${optionLabel(index)}.</td>
-            <td class="option-text">
-              ${answerHtml}
-              ${correct ? '<span class="inline-key-mark">✓</span>' : ''}
-            </td>
-          </tr>
-        `;
-      })
-      .join('');
-
-    return `
-      <table class="options-table" cellpadding="0" cellspacing="0">
-        <tbody>
-          ${rows}
-        </tbody>
-      </table>
-    `;
+  function printHTML(course, quiz, questions) {
+    let n = 0;
+    const keyRows = [];
+    const blocks = includedQuestions(questions, opt).map(q => {
+      const type = q.question_type;
+      if (type === "text_only_question") return `<div class="text-only">${clean(q.question_text)}</div>`;
+      n++;
+      let question = clean(q.question_text);
+      let answers = "";
+      if (["fill_in_multiple_blanks_question","multiple_dropdowns_question"].includes(type))
+        question = fillBlanks(question, q, opt.key);
+      if (["multiple_choice_question","multiple_answers_question","true_false_question"].includes(type)) {
+        answers = `<div class="answer-group">${answersFor(q, opt).map((a, i) =>
+          `<div class="choice ${opt.key && correct(a) ? "correct" : ""}">
+            <span class="choice-letter">${letter(i)}.</span><div>${clean(answerHTML(a))}
+            ${opt.key && correct(a) ? '<strong class="check">✓</strong>' : ""}</div></div>`).join("")}</div>`;
+      } else if (type === "short_answer_question") answers = responseLines(4);
+      else if (type === "essay_question") answers = responseLines(12);
+      else if (type === "matching_question") answers = matchingTable(q, opt.key);
+      else if (type === "numerical_question") answers = "<p>Answer: __________________________</p>";
+      else if (["fill_in_multiple_blanks_question","multiple_dropdowns_question"].includes(type)) answers = "";
+      else answers = responseLines(5);
+      if (opt.key) keyRows.push({n, text:keyFor(q, opt)});
+      return `<section class="question"><div class="qnum">${n}. ${opt.points ? `<small>${esc(q.points_possible ?? "")} pts</small>` : ""}</div>
+        <div class="qbody"><div class="prompt">${question}</div>${answers}</div></section>`;
+    }).join("");
+    const url = `${location.origin}/courses/${courseId}/quizzes/${quizId}`;
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(quiz.title || "Quiz")}</title>
+      <style>
+      @page{size:letter;margin:.65in}
+      body{font:11pt/1.45 Arial,sans-serif;color:#111;max-width:850px;margin:auto;padding:18px}
+      .toolbar{border:1px solid #cbd5e1;background:#f8fafc;padding:12px;font-size:13px;margin-bottom:22px}
+      .toolbar button{background:#003865;color:white;border:0;border-radius:5px;padding:9px 16px;margin-right:12px;cursor:pointer}
+      header.doc-header{border-bottom:2px solid #222;padding-bottom:14px;margin-bottom:20px}
+      h1{font-size:21pt;margin:0 0 10px}.meta{font-size:10pt}.student{display:flex;justify-content:space-between;margin-top:18px;font-size:10pt}
+      .instructions{background:#f7f7f7;border:1px solid #ddd;padding:10px;margin-bottom:20px}
+      .text-only{padding:10px;border-left:3px solid #aaa;margin-bottom:18px;break-inside:avoid}
+      .question{display:grid;grid-template-columns:45px minmax(0,1fr);gap:12px;margin-bottom:22px;
+        break-inside:avoid;page-break-inside:avoid}
+      .qnum{text-align:right;font-weight:bold}.qnum small{display:block;color:#666;font-size:8pt;font-weight:normal}
+      .qbody{min-width:0}.qbody img{max-width:100%;height:auto}.prompt{break-after:avoid;page-break-after:avoid}
+      .prompt p:first-child{margin-top:0}
+      .answer-group{margin-top:10px;break-inside:avoid;page-break-inside:avoid}
+      .choice{display:grid;grid-template-columns:28px minmax(0,1fr);padding:3px 0;break-inside:avoid;page-break-inside:avoid}
+      .choice-letter{font-weight:bold}.choice p{margin:0}.correct{font-weight:bold}.check{color:#157a37;margin-left:8px}
+      .response-line{height:25px;border-bottom:1px solid #bbb;margin:7px 0}
+      .matching{width:100%;border-collapse:collapse;margin-top:10px}
+      .matching td,.matching th{border:1px solid #ccc;padding:8px;text-align:left}
+      .blank{display:inline-block;min-width:110px;border-bottom:1px solid #333}
+      .key{break-before:page;page-break-before:always}.key h2{font-size:18pt;border-bottom:2px solid #222}
+      .key-row{display:grid;grid-template-columns:40px 1fr;padding:6px 0;border-bottom:1px solid #ddd;break-inside:avoid}
+      @media print{body{margin:0;padding:0;max-width:none}.toolbar{display:none!important}}
+      </style></head><body>
+      <div class="toolbar"><button onclick="window.print()">Print / Save PDF</button>
+      Turn off browser headers and footers for the cleanest PDF.</div>
+      <header class="doc-header"><h1>${esc(quiz.title || "Quiz")}</h1>
+      <div class="meta"><div><b>Course:</b> ${esc(course.name)}</div>
+      <div><b>Total Points:</b> ${esc(quiz.points_possible ?? "")}</div>
+      ${opt.link ? `<div><b>Online:</b> ${esc(url)}</div>` : ""}</div>
+      <div class="student"><span>Name: ______________________________</span><span>Score: ______________</span></div></header>
+      ${quiz.description ? `<div class="instructions">${clean(quiz.description)}</div>` : ""}
+      <main>${blocks}</main>
+      ${opt.key ? `<section class="key"><h2>Answer Key</h2>${keyRows.map(k =>
+        `<div class="key-row"><b>${k.n}.</b><span>${esc(k.text)}</span></div>`).join("")}</section>` : ""}
+      </body></html>`;
   }
 
-  function renderMatching(answers, showKey, collectKey) {
-    const items = (answers || [])
-      .map((answer, index) => ({
-        left: answer.match_question || answer.left || `Item ${index + 1}`,
-        right: answer.text || answer.right || ''
+  function run(text, style = {}) {
+    const pr = [];
+    if (style.bold) pr.push("<w:b/>");
+    if (style.italic) pr.push("<w:i/>");
+    if (style.underline) pr.push('<w:u w:val="single"/>');
+    if (style.super) pr.push('<w:vertAlign w:val="superscript"/>');
+    if (style.sub) pr.push('<w:vertAlign w:val="subscript"/>');
+    if (style.color) pr.push(`<w:color w:val="${style.color}"/>`);
+    if (style.size) pr.push(`<w:sz w:val="${style.size}"/>`);
+    const rPr = pr.length ? `<w:rPr>${pr.join("")}</w:rPr>` : "";
+    return `<w:r>${rPr}${String(text ?? "").split(/\r?\n/).map((v,i) =>
+      `${i ? "<w:br/>" : ""}<w:t xml:space="preserve">${esc(v)}</w:t>`).join("")}</w:r>`;
+  }
+  function paragraph(contents, config = {}) {
+    const attrs = [];
+    if (config.keepNext) attrs.push("<w:keepNext/>");
+    attrs.push("<w:keepLines/>");
+    if (config.newPage) attrs.push("<w:pageBreakBefore/>");
+    attrs.push(`<w:spacing w:before="${config.before ?? 0}" w:after="${config.after ?? 90}" w:line="290" w:lineRule="auto"/>`);
+    if (config.indent || config.hanging)
+      attrs.push(`<w:ind w:left="${config.indent || 0}" w:hanging="${config.hanging || 0}"/>`);
+    if (config.line) attrs.push('<w:pBdr><w:bottom w:val="single" w:sz="4" w:color="BBBBBB"/></w:pBdr>');
+    return `<w:p><w:pPr>${attrs.join("")}</w:pPr>${contents || run(" ")}</w:p>`;
+  }
+
+  class NativeDocx {
+    constructor() {
+      this.images = [];
+      this.imageCache = new Map();
+      this.relations = [];
+      this.imgCount = 0;
+      this.drawingCount = 0;
+      this.imageWarnings = 0;
+    }
+    async imageRun(element) {
+      const src = element.getAttribute("src");
+      const alt = element.getAttribute("alt") || "Image";
+      if (!src) return run(`[${alt}]`);
+      try {
+        const srcUrl = new URL(src, location.href).href;
+        let image = this.imageCache.get(srcUrl);
+        if (!image) {
+          status("Embedding quiz images...");
+          const response = await fetch(srcUrl, { credentials:"include" });
+          if (!response.ok) throw Error(`HTTP ${response.status}`);
+          let blob = await response.blob();
+          if (blob.size > 12 * 1024 * 1024) throw Error("Image exceeds 12 MB");
+          let mime = blob.type.split(";")[0].toLowerCase();
+          if (!["image/png","image/jpeg","image/gif"].includes(mime)) {
+            const bitmap = await createImageBitmap(blob);
+            const canvas = document.createElement("canvas");
+            canvas.width = bitmap.width;
+            canvas.height = bitmap.height;
+            canvas.getContext("2d").drawImage(bitmap, 0, 0);
+            bitmap.close();
+            const b = await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
+            if (!b) throw Error("Image conversion failed");
+            blob = b;
+            mime = "image/png";
+          }
+          const bitmap = await createImageBitmap(blob);
+          const width = bitmap.width;
+          const height = bitmap.height;
+          bitmap.close();
+          const extension = mime === "image/jpeg" ? "jpg" : mime === "image/gif" ? "gif" : "png";
+          const id = ++this.imgCount;
+          const filename = `image${id}.${extension}`;
+          const relId = `rIdImage${id}`;
+          this.images.push({name:`word/media/${filename}`, data:new Uint8Array(await blob.arrayBuffer())});
+          this.relations.push(`<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${filename}"/>`);
+          image = {relId,width,height};
+          this.imageCache.set(srcUrl,image);
+        }
+        const scale = Math.min(1, 580 / image.width, 720 / image.height);
+        const cx = Math.round(image.width * scale * 9525);
+        const cy = Math.round(image.height * scale * 9525);
+        const id = ++this.drawingCount;
+        return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">
+          <wp:extent cx="${cx}" cy="${cy}"/>
+          <wp:docPr id="${id}" name="Quiz Image ${id}" descr="${esc(alt)}"/>
+          <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+          <pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="Quiz Image ${id}"/><pic:cNvPicPr/></pic:nvPicPr>
+          <pic:blipFill><a:blip r:embed="${image.relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>
+          <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>
+          <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>
+          </a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+      } catch (e) {
+        this.imageWarnings++;
+        return run(`[Image unavailable: ${alt}]`);
+      }
+    }
+    async inline(nodes, style = {}) {
+      let result = "";
+      for (const node of nodes) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          result += run(node.nodeValue, style);
+          continue;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+        const tag = node.tagName.toLowerCase();
+        if (tag === "img") {result += await this.imageRun(node);continue;}
+        if (tag === "br") {result += "<w:r><w:br/></w:r>";continue;}
+        if (["script","style","iframe","object"].includes(tag)) continue;
+        const next = {...style};
+        if (["b","strong"].includes(tag)) next.bold = true;
+        if (["i","em"].includes(tag)) next.italic = true;
+        if (tag === "u") next.underline = true;
+        if (tag === "sup") next.super = true;
+        if (tag === "sub") next.sub = true;
+        if (tag === "a") {next.underline = true;next.color = "0563C1";}
+        result += await this.inline([...node.childNodes], next);
+      }
+      return result;
+    }
+    async richParagraphs(html) {
+      const div = document.createElement("div");
+      div.innerHTML = clean(html);
+      const output = [];
+      let pending = [];
+      async function pushPending(builder) {
+        if (pending.length) {
+          const r = await builder.inline(pending);
+          if (r) output.push(r);
+          pending = [];
+        }
+      }
+      const blocks = new Set(["P","DIV","SECTION","ARTICLE","H1","H2","H3","H4","H5","H6","BLOCKQUOTE","UL","OL","TABLE","PRE"]);
+      const walk = async el => {
+        for (const node of [...el.childNodes]) {
+          if (node.nodeType !== Node.ELEMENT_NODE || !blocks.has(node.tagName)) {
+            pending.push(node);continue;
+          }
+          await pushPending(this);
+          if (["UL","OL"].includes(node.tagName)) {
+            let i = Number(node.getAttribute("start")) || 1;
+            for (const li of [...node.children]) {
+              if (li.tagName !== "LI") continue;
+              const label = node.tagName === "OL" ? `${i++}. ` : "• ";
+              const content = await this.inline([...li.childNodes].filter(c =>
+                c.nodeType !== Node.ELEMENT_NODE || !["UL","OL"].includes(c.tagName)));
+              output.push(run(label) + content);
+            }
+          } else if (node.tagName === "TABLE") {
+            for (const tr of node.querySelectorAll("tr")) {
+              const cells = [...tr.children].filter(c => ["TD","TH"].includes(c.tagName));
+              if (cells.length) {
+                const parts = await Promise.all(cells.map(c => this.inline([...c.childNodes])));
+                output.push(parts.join(run("  |  ")));
+              }
+            }
+          } else if ([...node.children].some(c => blocks.has(c.tagName)) && node.tagName === "DIV") {
+            await walk(node);
+          } else {
+            const style = /^H[1-6]$/.test(node.tagName) ? {bold:true} : {};
+            output.push(await this.inline([...node.childNodes], style));
+          }
+        }
+        await pushPending(this);
+      };
+      await walk(div);
+      return output.filter(Boolean).length ? output.filter(Boolean) : [run(" ")];
+    }
+    async rich(html, config = {}, label = "") {
+      const entries = await this.richParagraphs(html);
+      return entries.map((r,i) => paragraph((i===0 ? label : "") + r, {
+        indent:config.indent ?? 0,
+        hanging:config.hanging ?? 0,
+        before:i===0 ? (config.before ?? 0) : 0,
+        after:i===entries.length-1 ? (config.after ?? 90) : 60,
+        keepNext:i<entries.length-1 || Boolean(config.keepNext)
       }));
-
-    if (collectKey) {
-      items.forEach((item, index) => {
-        collectKey(`Item ${index + 1}`, item.right);
-      });
     }
-
-    return `
-      <table class="matching" cellpadding="0" cellspacing="0">
-        <thead>
-          <tr>
-            <th>Item</th>
-            <th>Match</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${items
-            .map((item) => `
-              <tr>
-                <td>${cleanCanvasHTML(item.left)}</td>
-                <td>
-                  <div class="matching-line"></div>
-                  ${showKey && item.right ? `<div class="key-note">(${htmlSafe(item.right)})</div>` : ''}
-                </td>
-              </tr>
-            `)
-            .join('')}
-        </tbody>
-      </table>
-    `;
+    lines(n) {
+      return Array.from({length:n}, () => paragraph(run(" "), {line:true,after:190}));
+    }
+    async create(course, quiz, questions) {
+      const sections = [];
+      const title = quiz.title || "Quiz";
+      const url = `${location.origin}/courses/${courseId}/quizzes/${quizId}`;
+      sections.push(paragraph(run(title,{bold:true,size:36}),{after:170}));
+      sections.push(paragraph(run(`Course: ${course.name || ""}`),{after:50}));
+      sections.push(paragraph(run(`Total Points: ${quiz.points_possible ?? ""}`),{after:50}));
+      if (opt.link) sections.push(paragraph(run(`Online Quiz: ${url}`,{color:"0563C1",underline:true,size:18}),{after:130}));
+      sections.push(paragraph(run("Name: ___________________________       Score: __________"),{after:260}));
+      if (quiz.description) {
+        sections.push(paragraph(run("Instructions",{bold:true}),{keepNext:true,after:90}));
+        sections.push(...await this.rich(quiz.description,{after:160}));
+      }
+      let n=0;
+      const keyRows=[];
+      const list=includedQuestions(questions,opt);
+      for (let i=0; i<list.length; i++) {
+        const q=list[i];
+        status(`Building Word document: ${i+1} of ${list.length}`);
+        if (q.question_type === "text_only_question") {
+          sections.push(...await this.rich(q.question_text,{before:120,after:130}));continue;
+        }
+        n++;
+        const type = q.question_type;
+        const prompt = ["fill_in_multiple_blanks_question","multiple_dropdowns_question"].includes(type)
+          ? fillBlanks(q.question_text,q,opt.key) : q.question_text || "";
+        sections.push(...await this.rich(prompt,
+          {indent:380,hanging:380,before:160,after:95,keepNext:true},run(`${n}. `,{bold:true})));
+        if (opt.points) sections.push(paragraph(run(`(${q.points_possible ?? 0} pts)`,{size:16,color:"666666"}),{
+          indent:380,after:95,keepNext:true}));
+        if (["multiple_choice_question","multiple_answers_question","true_false_question"].includes(type)) {
+          const answers = answersFor(q,opt);
+          if (!answers.length) sections.push(paragraph(run("[No choices returned by Canvas]"),{after:180}));
+          for (let j=0;j<answers.length;j++) {
+            const a = answers[j];
+            const label = run(`${letter(j)}. `,{bold:true});
+            const isRight = opt.key && correct(a);
+            // Keep each answer (including its rich text) with the next answer,
+            // except for the final answer. Word can still split oversized groups.
+            const keepNext = j < answers.length-1 || isRight;
+            sections.push(...await this.rich(answerHTML(a),{
+              indent:700,hanging:280,
+              after:j===answers.length-1 && !isRight ? 230 : 75,
+              keepNext
+            },label));
+            if (isRight) sections.push(paragraph(run("Correct answer",{bold:true,color:"15803D",size:17}),{
+              indent:700,after:j===answers.length-1 ? 220 : 75,
+              keepNext:j<answers.length-1
+            }));
+          }
+        } else if (type === "essay_question") {
+          sections.push(...this.lines(12));
+        } else if (type === "short_answer_question") {
+          sections.push(...this.lines(4));
+        } else if (["fill_in_multiple_blanks_question","multiple_dropdowns_question"].includes(type)) {
+          sections.push(paragraph(run(" "),{after:160}));
+        } else if (type === "matching_question") {
+          const answers = q.answers || [];
+          for (let j=0;j<answers.length;j++) {
+            const a=answers[j];
+            sections.push(paragraph(run(`${j+1}. ${plain(a.match_question || a.answer_match_left || "")}    ____________`),{
+              indent:700,after:90,keepNext:j<answers.length-1 || opt.key}));
+            if (opt.key) sections.push(paragraph(run(`Match: ${plain(a.text || a.answer_match_right || "")}`,{color:"15803D",size:17}),{
+              indent:700,after:75,keepNext:j<answers.length-1}));
+          }
+        } else if (type === "numerical_question") {
+          sections.push(paragraph(run("Answer: __________________________"),{indent:700,after:220}));
+        } else {
+          sections.push(...this.lines(5));
+        }
+        if (opt.key) keyRows.push({number:n,text:keyFor(q,opt)});
+      }
+      if (opt.key && keyRows.length) {
+        sections.push(paragraph(run("Answer Key",{bold:true,size:30}),{newPage:true,keepNext:true,after:220}));
+        for (const key of keyRows) sections.push(paragraph(
+          run(`${key.number}. `,{bold:true})+run(key.text),{indent:380,hanging:380,after:120}));
+      }
+      const documentXML = `<?xml version="1.0" encoding="UTF-8"?>
+        <w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:wp="${WP}" xmlns:a="${A}" xmlns:pic="${PIC}">
+        <w:body>${sections.join("")}
+        <w:sectPr><w:pgSz w:w="12240" w:h="15840"/>
+        <w:pgMar w:top="936" w:right="936" w:bottom="936" w:left="936"
+          w:header="450" w:footer="450" w:gutter="0"/></w:sectPr></w:body></w:document>`;
+      const stylesXML = `<?xml version="1.0" encoding="UTF-8"?><w:styles xmlns:w="${W}">
+        <w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/>
+        <w:sz w:val="22"/></w:rPr></w:rPrDefault>
+        <w:pPrDefault><w:pPr><w:spacing w:after="90" w:line="290" w:lineRule="auto"/></w:pPr>
+        </w:pPrDefault></w:docDefaults>
+        <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+        </w:styles>`;
+      const rels = `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="${PKG_REL}">
+        <Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+        ${this.relations.join("")}</Relationships>`;
+      const rootRels = `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="${PKG_REL}">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        </Relationships>`;
+      const contentTypes = `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/>
+        <Default Extension="jpg" ContentType="image/jpeg"/><Default Extension="gif" ContentType="image/gif"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+        </Types>`;
+      return zip([
+        {name:"[Content_Types].xml",data:contentTypes},
+        {name:"_rels/.rels",data:rootRels},
+        {name:"word/document.xml",data:documentXML},
+        {name:"word/styles.xml",data:stylesXML},
+        {name:"word/_rels/document.xml.rels",data:rels},
+        ...this.images
+      ]);
+    }
   }
 
-  function renderBlanks(html, answers, showKey, collectKey, mode) {
-    let body = html || '';
-
-    const tokens = [...body.matchAll(/\[([^\]]*)\]/g)].map((match) => ({
-      raw: match[0],
-      id: match[1]
-    }));
-
-    const byBlank = {};
-
-    (answers || []).forEach((answer) => {
-      if (!answer.blank_id) return;
-
-      byBlank[answer.blank_id] = byBlank[answer.blank_id] || [];
-      byBlank[answer.blank_id].push(answer.text || answer.html || '');
-    });
-
-    if (tokens.length) {
-      tokens.forEach((token) => {
-        const values = byBlank[token.id] || [];
-
-        const keyNote = showKey && values.length
-          ? `<span class="key-note">(${htmlSafe(values.join(' | '))})</span>`
-          : '';
-
-        body = body.replace(token.raw, `<span class="blank-line"></span>${keyNote}`);
-
-        if (collectKey && values.length) {
-          collectKey(token.id, values.join(' | '));
-        }
-      });
-    } else {
-      body += renderAnswerLines(2, mode);
-
-      const acceptedAnswers = (answers || [])
-        .map((answer) => answer.text)
-        .filter(Boolean);
-
-      if (showKey && acceptedAnswers.length) {
-        body += `<div class="key-note">Answers: ${htmlSafe(acceptedAnswers.join(' | '))}</div>`;
-
-        if (collectKey) {
-          collectKey('Answers', acceptedAnswers.join(' | '));
-        }
-      }
+  // Pure JavaScript ZIP (STORE method), producing a valid DOCX package.
+  const crcTable = (() => {
+    const table = new Uint32Array(256);
+    for (let n=0;n<256;n++) {
+      let c=n;
+      for (let i=0;i<8;i++) c=c&1 ? 0xedb88320 ^ (c>>>1) : c>>>1;
+      table[n]=c>>>0;
     }
-
-    return body;
+    return table;
+  })();
+  function crc32(bytes) {
+    let c=0xffffffff;
+    for (const b of bytes) c=crcTable[(c^b)&255]^(c>>>8);
+    return (c^0xffffffff)>>>0;
   }
-
-  /* ---------- Main Document Builder ---------- */
-  function buildDocumentHTML({
-    course,
-    quiz,
-    questions,
-    options,
-    course_id,
-    quiz_id
-  }) {
-    const {
-      showPoints,
-      onePerGroup,
-      showKey,
-      showLink,
-      shuffleAnswers,
-      format
-    } = options;
-
-    const mode = format === 'word' ? 'word' : 'print';
-
-    const today = new Date().toLocaleDateString(undefined, {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    });
-
-    let questionNumber = 0;
-    const usedGroups = new Set();
-    const answerKeyRows = [];
-
-    function pushKeyRow(number, value) {
-      const text = String(value || '').trim();
-      if (!text) return;
-
-      answerKeyRows.push({
-        number,
-        text
-      });
+  function zip(entries) {
+    const enc=new TextEncoder();
+    const fileParts=[];
+    const central=[];
+    let offset=0;
+    const now=new Date();
+    const dt=(now.getHours()<<11)|(now.getMinutes()<<5)|(Math.floor(now.getSeconds()/2));
+    const dd=((Math.max(1980,now.getFullYear())-1980)<<9)|((now.getMonth()+1)<<5)|now.getDate();
+    for (const file of entries) {
+      const name=enc.encode(file.name);
+      const bytes=typeof file.data==="string" ? enc.encode(file.data) : file.data;
+      const checksum=crc32(bytes);
+      const header=new Uint8Array(30+name.length);
+      const h=new DataView(header.buffer);
+      h.setUint32(0,0x04034b50,true);
+      h.setUint16(4,20,true);
+      h.setUint16(6,0x0800,true);
+      h.setUint16(8,0,true);
+      h.setUint16(10,dt,true);
+      h.setUint16(12,dd,true);
+      h.setUint32(14,checksum,true);
+      h.setUint32(18,bytes.length,true);
+      h.setUint32(22,bytes.length,true);
+      h.setUint16(26,name.length,true);
+      h.setUint16(28,0,true);
+      header.set(name,30);
+      fileParts.push(header,bytes);
+      const cent=new Uint8Array(46+name.length);
+      const c=new DataView(cent.buffer);
+      c.setUint32(0,0x02014b50,true);
+      c.setUint16(4,20,true);
+      c.setUint16(6,20,true);
+      c.setUint16(8,0x0800,true);
+      c.setUint16(10,0,true);
+      c.setUint16(12,dt,true);
+      c.setUint16(14,dd,true);
+      c.setUint32(16,checksum,true);
+      c.setUint32(20,bytes.length,true);
+      c.setUint32(24,bytes.length,true);
+      c.setUint16(28,name.length,true);
+      c.setUint16(30,0,true);
+      c.setUint16(32,0,true);
+      c.setUint16(34,0,true);
+      c.setUint16(36,0,true);
+      c.setUint32(38,0,true);
+      c.setUint32(42,offset,true);
+      cent.set(name,46);
+      central.push(cent);
+      offset += header.length + bytes.length;
     }
-
-    /* ---------- Optional Online Link ---------- */
-    const onlineLink = showLink
-      ? `
-        <div class="online-link">
-          <strong>Online:</strong>
-          ${
-            mode === 'word'
-              ? htmlSafe(location.href)
-              : `<a href="${htmlSafe(location.href)}">${htmlSafe(location.href)}</a>`
-          }
-        </div>
-      `
-      : '';
-
-    /* ---------- Header ---------- */
-    const header = `
-      <table class="document-header" cellpadding="0" cellspacing="0">
-        <tr>
-          <td>
-            <div class="quiz-title">${htmlSafe(quiz.title || 'Quiz')}</div>
-
-            ${onlineLink}
-
-            <div class="quiz-meta">
-              <div><strong>Course:</strong> ${htmlSafe(course.name || '')}</div>
-              <div><strong>Total Points:</strong> ${htmlSafe(String(quiz.points_possible ?? ''))}</div>
-              <div><strong>Date:</strong> ${htmlSafe(today)}</div>
-            </div>
-
-            <table class="student-info" cellpadding="0" cellspacing="0">
-              <tr>
-                <td>
-                  <strong>Name:</strong>
-                  <span class="field-line"></span>
-                </td>
-                <td>
-                  <strong>Score:</strong>
-                  <span class="field-line short"></span>
-                </td>
-              </tr>
-            </table>
-          </td>
-        </tr>
-      </table>
-    `;
-
-    /* ---------- Instructions ---------- */
-    const instructions = quiz.description
-      ? `
-        <div class="instructions">
-          <strong>Instructions:</strong>
-          ${cleanCanvasHTML(quiz.description)}
-        </div>
-      `
-      : '';
-
-    /* ---------- Questions ---------- */
-    const questionBlocks = questions
-      .filter((question) => {
-        if (!onePerGroup || !question.quiz_group_id) {
-          return true;
-        }
-
-        if (usedGroups.has(question.quiz_group_id)) {
-          return false;
-        }
-
-        usedGroups.add(question.quiz_group_id);
-        return true;
-      })
-      .map((question) => {
-        const type = (question.question_type || '').toLowerCase();
-        const questionText = cleanCanvasHTML(question.question_text || '');
-
-        /* Text-only Canvas question */
-        if (type === 'text_only_question') {
-          return `<div class="text-only-block">${questionText}</div>`;
-        }
-
-        questionNumber++;
-
-        const points = typeof question.points_possible === 'number'
-          ? question.points_possible
-          : '';
-
-        const pointsHtml = showPoints
-          ? `<div class="question-points">${htmlSafe(String(points))} pts</div>`
-          : '';
-
-        let body = '';
-
-        const collectKey = (label, value) => {
-          pushKeyRow(questionNumber, `${label}: ${value}`);
-        };
-
-        /* ---------- MC / Multiple Answer / True-False ---------- */
-        if (
-          type.includes('multiple_answers') ||
-          type.includes('multiple_choice') ||
-          type === 'true_false_question'
-        ) {
-          let answers = question.answers && question.answers.length
-            ? question.answers
-            : [];
-
-          if (shuffleAnswers && type !== 'true_false_question') {
-            const seed = `${course_id}:${quiz_id}:${question.id || questionNumber}:answers`;
-            answers = shuffleArrayDeterministic(answers, seed);
-          }
-
-          body = `
-            ${questionText}
-            ${renderLetteredOptions(answers, showKey)}
-          `;
-
-          if (showKey) {
-            const correctAnswers = answers
-              .map((answer, index) => ({
-                answer,
-                label: optionLabel(index)
-              }))
-              .filter(({ answer }) => isCorrect(answer))
-              .map(({ answer, label }) => `${label}. ${answer.text || answer.html || ''}`);
-
-            pushKeyRow(
-              questionNumber,
-              correctAnswers.join(' | ') || 'No correct answer flagged'
-            );
-          }
-        }
-
-        /* ---------- Short Answer ---------- */
-        else if (type.includes('short_answer')) {
-          body = `
-            ${questionText}
-            ${renderAnswerLines(4, mode)}
-          `;
-
-          if (showKey) {
-            const answers = (question.answers || [])
-              .map((answer) => answer.text)
-              .filter(Boolean);
-
-            pushKeyRow(
-              questionNumber,
-              answers.join(' | ') || 'Manual grading'
-            );
-          }
-        }
-
-        /* ---------- Essay ---------- */
-        else if (type.includes('essay')) {
-          body = `
-            ${questionText}
-            ${renderAnswerLines(12, mode)}
-          `;
-
-          if (showKey) {
-            pushKeyRow(questionNumber, 'Manual grading');
-          }
-        }
-
-        /* ---------- Fill in Blank / Dropdown ---------- */
-        else if (type.includes('fill_in') || type.includes('dropdown')) {
-          body = renderBlanks(
-            questionText,
-            question.answers,
-            showKey,
-            collectKey,
-            mode
-          );
-        }
-
-        /* ---------- Matching ---------- */
-        else if (type.includes('matching')) {
-          const answers = question.answers || [];
-
-          body = `
-            ${questionText}
-            ${renderMatching(answers, showKey, collectKey)}
-          `;
-        }
-
-        /* ---------- Numerical ---------- */
-        else if (type.includes('numerical')) {
-          body = `
-            ${questionText}
-
-            <div class="single-answer">
-              <strong>Answer:</strong>
-              <span class="single-answer-line"></span>
-            </div>
-          `;
-
-          if (showKey) {
-            const values = (question.answers || [])
-              .map((answer) => {
-                if (answer.exact !== undefined) {
-                  return answer.margin
-                    ? `${answer.exact} ± ${answer.margin}`
-                    : String(answer.exact);
-                }
-
-                if (answer.numerical_answer !== undefined) {
-                  return String(answer.numerical_answer);
-                }
-
-                return answer.text || '';
-              })
-              .filter(Boolean);
-
-            pushKeyRow(questionNumber, values.join(' | '));
-          }
-        }
-
-        /* ---------- File Upload ---------- */
-        else if (type.includes('file_upload')) {
-          body = `
-            ${questionText}
-            <div class="note-box">File Upload Question</div>
-          `;
-
-          if (showKey) {
-            pushKeyRow(questionNumber, 'File upload');
-          }
-        }
-
-        /* ---------- Fallback ---------- */
-        else {
-          body = `
-            ${questionText}
-            ${renderAnswerLines(5, mode)}
-          `;
-        }
-
-        return `
-          <table class="question-table" cellpadding="0" cellspacing="0">
-            <tr>
-              <td class="question-number">
-                <div>${questionNumber}.</div>
-                ${pointsHtml}
-              </td>
-              <td class="question-body">
-                ${body}
-              </td>
-            </tr>
-          </table>
-        `;
-      })
-      .join('');
-
-    /* ---------- Answer Key ---------- */
-    const answerKey = showKey && answerKeyRows.length
-      ? `
-        <div class="page-break"></div>
-
-        <section class="answer-key">
-          <div class="answer-key-title">Answer Key</div>
-
-          <table class="answer-key-table" cellpadding="0" cellspacing="0">
-            ${answerKeyRows
-              .map((row) => `
-                <tr>
-                  <td class="answer-key-number">${row.number}.</td>
-                  <td class="answer-key-value">${htmlSafe(row.text)}</td>
-                </tr>
-              `)
-              .join('')}
-          </table>
-        </section>
-      `
-      : '';
-
-    /* ---------- Word XML ---------- */
-    const wordXml = `
-      <xml>
-        <w:WordDocument>
-          <w:View>Print</w:View>
-          <w:Zoom>100</w:Zoom>
-          <w:DoNotOptimizeForBrowser/>
-        </w:WordDocument>
-      </xml>
-    `;
-
-    /* ---------- CSS ---------- */
-    const css = `
-      @page {
-        margin: 0.65in;
-      }
-
-      body {
-        margin: 0;
-        padding: 18px;
-        color: #111;
-        line-height: 1.45;
-        font-family: Arial, Helvetica, sans-serif;
-        font-size: 11pt;
-      }
-
-      @media print {
-        body {
-          padding: 0;
-        }
-
-        .screen-only {
-          display: none !important;
-        }
-      }
-
-      .screen-only {
-        display: block;
-      }
-
-      /* ---------- Preview Toolbar ---------- */
-      .preview-toolbar {
-        background: #f4f4f4;
-        border: 1px solid #d4d4d4;
-        border-radius: 6px;
-        padding: 9px 11px;
-        margin-bottom: 16px;
-        font-size: 9.5pt;
-        color: #444;
-      }
-
-      .preview-toolbar button {
-        appearance: none;
-        border: 1px solid #bbb;
-        background: #fff;
-        padding: 6px 12px;
-        border-radius: 5px;
-        cursor: pointer;
-        font-weight: bold;
-        margin-right: 10px;
-      }
-
-      /* ---------- Header ---------- */
-      .document-header {
-        width: 100%;
-        border-collapse: collapse;
-        border-bottom: 2px solid #222;
-        padding-bottom: 10px;
-        margin-bottom: 16px;
-      }
-
-      .quiz-title {
-        font-size: 21pt;
-        font-weight: bold;
-        margin-bottom: 7px;
-      }
-
-      .quiz-meta {
-        font-size: 9.5pt;
-        color: #333;
-      }
-
-      .quiz-meta div {
-        margin-bottom: 2px;
-      }
-
-      .online-link {
-        font-size: 9pt;
-        margin-bottom: 6px;
-        word-break: break-word;
-      }
-
-      .student-info {
-        width: 100%;
-        margin-top: 16px;
-      }
-
-      .student-info td {
-        width: 50%;
-        padding-right: 24px;
-        font-size: 10pt;
-      }
-
-      .field-line {
-        display: inline-block;
-        width: 220px;
-        border-bottom: 1px solid #222;
-        height: 14px;
-        margin-left: 7px;
-      }
-
-      .field-line.short {
-        width: 100px;
-      }
-
-      /* ---------- Instructions ---------- */
-      .instructions {
-        background: #f5f5f5;
-        border: 1px solid #ddd;
-        padding: 10px 12px;
-        margin: 0 0 22px;
-        font-size: 10pt;
-        line-height: 1.45;
-      }
-
-      .instructions p:first-child {
-        margin-top: 6px;
-      }
-
-      .instructions p:last-child {
-        margin-bottom: 4px;
-      }
-
-      /* ---------- Text Block ---------- */
-      .text-only-block {
-        margin: 14px 0 20px;
-        padding: 10px 12px;
-        border-left: 3px solid #aaa;
-        page-break-inside: avoid;
-      }
-
-      /* ---------- Question ---------- */
-      .question-table {
-        width: 100%;
-        border-collapse: collapse;
-        margin: 0 0 20px;
-        page-break-inside: avoid;
-      }
-
-      .question-number {
-        width: 44px;
-        vertical-align: top;
-        text-align: right;
-        padding-right: 11px;
-        font-weight: bold;
-        font-size: 11pt;
-      }
-
-      .question-points {
-        margin-top: 4px;
-        color: #666;
-        font-size: 8pt;
-        font-weight: normal;
-        white-space: nowrap;
-      }
-
-      .question-body {
-        vertical-align: top;
-        font-size: 11pt;
-      }
-
-      .question-body p:first-child {
-        margin-top: 0;
-      }
-
-      .question-body img {
-        max-width: 100%;
-        height: auto;
-      }
-
-      /* ---------- Answer Choices ---------- */
-      .options-table {
-        width: 100%;
-        border-collapse: collapse;
-        margin-top: 9px;
-      }
-
-      .options-table tr {
-        page-break-inside: avoid;
-      }
-
-      .options-table td {
-        padding-top: 3px;
-        padding-bottom: 3px;
-        vertical-align: top;
-      }
-
-      .option-label {
-        width: 28px;
-        padding-right: 5px;
-        font-weight: bold;
-        white-space: nowrap;
-      }
-
-      .option-text {
-        padding-left: 0;
-      }
-
-      .option-text p {
-        margin-top: 0;
-        margin-bottom: 0;
-      }
-
-      .correct .option-text {
-        font-weight: bold;
-      }
-
-      .inline-key-mark {
-        color: #157a37;
-        margin-left: 7px;
-        font-weight: bold;
-      }
-
-      /* ---------- Written Answer Lines ---------- */
-      .answer-lines {
-        margin-top: 10px;
-      }
-
-      .answer-lines .line {
-        border-bottom: 1px solid #bbb;
-        margin-bottom: 7px;
-      }
-
-      .single-answer {
-        margin-top: 12px;
-      }
-
-      .single-answer-line {
-        display: inline-block;
-        min-width: 220px;
-        border-bottom: 1px solid #333;
-        height: 14px;
-        margin-left: 8px;
-      }
-
-      .blank-line {
-        display: inline-block;
-        width: 120px;
-        border-bottom: 1px solid #222;
-        height: 1em;
-        margin: 0 5px;
-      }
-
-      /* ---------- Matching ---------- */
-      .matching {
-        width: 100%;
-        border-collapse: collapse;
-        margin-top: 10px;
-        font-size: 9.5pt;
-      }
-
-      .matching th,
-      .matching td {
-        border: 1px solid #ccc;
-        padding: 7px;
-        text-align: left;
-        vertical-align: top;
-      }
-
-      .matching th {
-        background: #f3f3f3;
-      }
-
-      .matching-line {
-        border-bottom: 1px solid #888;
-        height: 18px;
-      }
-
-      /* ---------- Misc ---------- */
-      .note-box {
-        border: 1px dashed #999;
-        padding: 9px;
-        margin-top: 10px;
-        color: #555;
-        font-size: 9pt;
-      }
-
-      .key-note {
-        color: #157a37;
-        font-size: 9pt;
-        font-weight: bold;
-        margin-left: 5px;
-      }
-
-      /* ---------- Answer Key ---------- */
-      .page-break {
-        page-break-before: always;
-      }
-
-      .answer-key-title {
-        font-size: 18pt;
-        font-weight: bold;
-        border-bottom: 2px solid #222;
-        padding-bottom: 7px;
-        margin-bottom: 10px;
-      }
-
-      .answer-key-table {
-        width: 100%;
-        border-collapse: collapse;
-      }
-
-      .answer-key-table td {
-        padding: 6px 0;
-        border-bottom: 1px solid #ddd;
-        vertical-align: top;
-      }
-
-      .answer-key-number {
-        width: 38px;
-        font-weight: bold;
-      }
-
-      .answer-key-value {
-        padding-left: 8px;
-      }
-    `;
-
-    /* ---------- Browser-only Toolbar ---------- */
-    const previewToolbar = mode === 'print'
-      ? `
-        <div class="preview-toolbar screen-only">
-          <button onclick="window.print()">Print</button>
-          <span>For the cleanest PDF, turn off "Headers and Footers" in the print dialog.</span>
-        </div>
-      `
-      : '';
-
-    return `
-      <!DOCTYPE html>
-
-      <html
-        xmlns:o="urn:schemas-microsoft-com:office:office"
-        xmlns:w="urn:schemas-microsoft-com:office:word"
-        xmlns="http://www.w3.org/TR/REC-html40"
-      >
-        <head>
-          <meta charset="utf-8">
-
-          <title>${htmlSafe(quiz.title || 'Quiz')}</title>
-
-          ${mode === 'print'
-            ? '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            : ''}
-
-          ${mode === 'word'
-            ? `<!--[if gte mso 9]>${wordXml}<![endif]-->`
-            : ''}
-
-          <style>
-            ${css}
-          </style>
-        </head>
-
-        <body>
-          ${previewToolbar}
-          ${header}
-          ${instructions}
-
-          <main>
-            ${questionBlocks}
-          </main>
-
-          ${answerKey}
-        </body>
-      </html>
-    `;
+    const cdSize=central.reduce((sum,x)=>sum+x.length,0);
+    const end=new Uint8Array(22);
+    const e=new DataView(end.buffer);
+    e.setUint32(0,0x06054b50,true);
+    e.setUint16(4,0,true);
+    e.setUint16(6,0,true);
+    e.setUint16(8,entries.length,true);
+    e.setUint16(10,entries.length,true);
+    e.setUint32(12,cdSize,true);
+    e.setUint32(16,offset,true);
+    e.setUint16(20,0,true);
+    return new Blob([...fileParts,...central,end],{type:DOCX_MIME});
   }
-
-  /* ---------- Output ---------- */
-  function downloadAsWordDoc(filename, html) {
-    const blob = new Blob(
-      ['\ufeff', html],
-      {
-        type: 'application/vnd.ms-word;charset=utf-8'
-      }
-    );
-
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-
-    link.href = url;
-    link.download = `${filename}.doc`;
-
+  function downloadFile(blob,filename) {
+    const url=URL.createObjectURL(blob);
+    const link=document.createElement("a");
+    link.href=url;
+    link.download=filename;
     document.body.appendChild(link);
     link.click();
     link.remove();
-
-    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    setTimeout(()=>URL.revokeObjectURL(url),10000);
   }
-
-  function openPreview(html) {
-    const preview = window.open('', '_blank');
-
-    if (!preview) {
-      throw new Error('Popup blocked. Allow popups for Canvas and try again.');
-    }
-
-    preview.document.open();
-    preview.document.write(html);
-    preview.document.close();
-  }
-
-  /* ---------- Run ---------- */
   try {
-    assertClassicQuizPage();
-
-    const config = await getPrintOptions();
-    if (!config) return;
-
-    const { options, close } = config;
-
-    showSpinner('Fetching quiz data...');
-
-    const { course_id, quiz_id } = getCourseAndQuizIds();
-
-    const [course, quiz] = await Promise.all([
-      canvasGet(`/api/v1/courses/${course_id}`),
-      canvasGet(`/api/v1/courses/${course_id}/quizzes/${quiz_id}`)
+    status("Loading quiz information...");
+    const [course,quiz]=await Promise.all([
+      getJSON(`/api/v1/courses/${courseId}`),
+      getJSON(`/api/v1/courses/${courseId}/quizzes/${quizId}`)
     ]);
-
-    showSpinner('Fetching questions...');
-
-    const questions = await getAllPages(
-      `/api/v1/courses/${course_id}/quizzes/${quiz_id}/questions?per_page=100`
-    );
-
-    questions.sort(
-      (a, b) =>
-        (a.position || 0) -
-        (b.position || 0)
-    );
-
-    showSpinner('Building document...');
-
-    const html = buildDocumentHTML({
-      course,
-      quiz,
-      questions,
-      options,
-      course_id,
-      quiz_id
-    });
-
-    close();
-    hideSpinner();
-
-    const filename = (quiz.title || 'Quiz')
-      .replace(/[^a-z0-9]+/gi, '_')
-      .replace(/^_+|_+$/g, '');
-
-    if (options.format === 'word') {
-      downloadAsWordDoc(filename || 'Quiz', html);
-      toast('Word document downloaded.');
+    status("Loading quiz questions...");
+    const questions=await getPages(`/api/v1/courses/${courseId}/quizzes/${quizId}/questions?per_page=100`);
+    questions.sort((a,b)=>(a.position??0)-(b.position??0));
+    if (!questions.length) throw Error("Canvas returned no quiz questions.");
+    const filename=(quiz.title||"Quiz").replace(/[^a-z0-9]+/gi,"_").replace(/^_+|_+$/g,"")||"Quiz";
+    if (opt.format==="docx") {
+      const builder=new NativeDocx();
+      status("Creating native Word document...");
+      const blob=await builder.create(course,quiz,questions);
+      downloadFile(blob,`${filename}.docx`);
+      if (builder.imageWarnings) {
+        status(`Word document saved. ${builder.imageWarnings} image(s) could not be embedded and are identified in the document.`);
+        const gen=sel("#qp-generate");
+        gen.textContent="Close";
+        gen.disabled=false;
+        gen.onclick=()=>dialog.remove();
+      } else {
+        dialog.remove();
+      }
     } else {
-      openPreview(html);
-      toast('Print preview opened in a new tab.');
+      status("Preparing print preview...");
+      preview.document.open();
+      preview.document.write(printHTML(course,quiz,questions));
+      preview.document.close();
+      preview.focus();
+      dialog.remove();
     }
-  } catch (error) {
-    hideSpinner();
-
-    document
-      .getElementById('quiz-print-modal')
-      ?.remove();
-
-    console.error(error);
-
-    toast(
-      `Error: ${error.message}`,
-      'error'
-    );
+  } catch(e) {
+    console.error(e);
+    status(`Error: ${e.message}`);
+    sel("#qp-status").style.color="#b91c1c";
+    const btn=sel("#qp-generate");
+    btn.textContent="Generate";
+    btn.disabled=false;
+    if (preview && !preview.closed) preview.close();
   }
 })();
